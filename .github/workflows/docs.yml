@@ -1,0 +1,34 @@
+name: docs
+
+# 저장소 전체 문서(markdownlint). 도구별 검사는 도구 이름의 워크플로(예: vulnerability.yml)가 맡는다.
+# push는 main만, 브랜치 작업은 PR 이벤트로만 — 같은 커밋이 두 번 돌지 않게.
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**/*.md'
+      - '.markdownlint.jsonc'
+      - '.github/workflows/docs.yml'
+  pull_request:
+    paths:
+      - '**/*.md'
+      - '.markdownlint.jsonc'
+      - '.github/workflows/docs.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  markdownlint:
+    name: markdownlint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: markdownlint
+        uses: DavidAnson/markdownlint-cli2-action@v25
+        with:
+          globs: |
+            **/*.md

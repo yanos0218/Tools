@@ -1,21 +1,29 @@
 # Changelog
 
-이 저장소의 변경 이력. 형식은 [Keep a Changelog](https://keepachangelog.com/ko/1.1.0/) 기준. 도구별 이력은 각 폴더의 CHANGELOG에 있음.
+이 저장소의 변경 이력. 형식은 [Keep a Changelog](https://keepachangelog.com/ko/1.1.0/) 기준. 도구별 이력은 각 도구 폴더의 CHANGELOG에 있음.
 
 ## [Unreleased]
 
 ### Added
 
 - 이 파일 신설
-- [n2sf-hardening/](n2sf-hardening/README.md) 이관
-  - 기존 배포본 v1.1.0(2026-11-12)을 그대로 옮김. 스크립트 내용은 바꾸지 않음.
-  - 도구별 이력은 [n2sf-hardening/CHANGELOG.md](n2sf-hardening/CHANGELOG.md) 참고.
-- CI 신설(`.github/workflows/ci.yml`)
-  - markdownlint
-  - `bash -n`, `shellcheck`
-  - n2sf-hardening 회귀 테스트(`ubuntu-24.04`, root)
+- [vulnerability/](vulnerability/README.md) 이관
+  - 기존 배포본 v1.1.0(2026-11-12)을 옮김. 폴더 이름은 `n2sf-hardening`에서 `vulnerability`로 정함.
+  - 도구별 이력은 [vulnerability/CHANGELOG.md](vulnerability/CHANGELOG.md) 참고.
+- 저장소 공통 문서(메인)
+  - [docs/structure.md](docs/structure.md)에 구조도, 메인·서브 구분, 도구 폴더 규약, 이름 규칙
+  - [docs/workflow.md](docs/workflow.md)에 변경 흐름, CI 구조, 새 도구 추가 절차
+  - 루트 README에 도구 목록 표(분류·대상 환경·버전·검증)
+- [vulnerability/docs/architecture.md](vulnerability/docs/architecture.md) 신설(서브 문서, 다이어그램)
+- 워크플로
+  - `docs.yml`은 저장소 전체 markdownlint
+  - `vulnerability.yml`은 `bash -n`, `shellcheck`, 회귀 테스트(`ubuntu-24.04`, root), libwrap 링크 확인(참고)
 - 저장소 표준 파일
   - `CLAUDE.md`
   - `.gitignore`(비밀 파일 패턴)
   - `.markdownlint.jsonc`
   - `.github/dependabot.yml`(github-actions, 월 1회)
+
+### Changed
+
+- 워크플로를 도구별 파일로 분리하고 경로 필터를 추가함(도구 폴더가 바뀔 때만 해당 검사 실행).
