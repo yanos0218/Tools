@@ -11,3 +11,4 @@ id_ed25519*
 
 # 로컬 Claude Code 설정
 .claude/settings.local.json
+dist/
