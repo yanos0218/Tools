@@ -10,7 +10,9 @@
 
 ## 검증
 
-- 문서: `npx markdownlint-cli2 "**/*.md"` (설정은 [.markdownlint.jsonc](.markdownlint.jsonc))
+- 문서
+  - `npx markdownlint-cli2@latest "**/*.md"` 실행. 설정은 [.markdownlint.jsonc](.markdownlint.jsonc)에 있다.
+  - 버전을 `latest`로 쓰는 이유는 CI 액션이 최신 규칙을 쓰기 때문이다. 2026-11-14 옛 버전 로컬 검사는 통과했는데 CI에서 표 규칙 MD060으로 실패했다.
 - 셸 문법·정적 분석: `bash -n <파일>`, `shellcheck -S warning <파일>` (n2sf-hardening 폴더에서 실행해야 [.shellcheckrc](n2sf-hardening/.shellcheckrc)가 적용된다)
 - n2sf-hardening 회귀 테스트(`tests/run_tests.sh`)는 Ubuntu 24.04 root 전용이라 맥에서 실행하지 않는다. CI(`ubuntu-24.04`) 결과로만 "통과"라고 쓴다. CI 확인은 `gh run watch <실행ID> --exit-status`.
 - 로컬에서 못 돌린 검사는 "미검증"으로 쓴다.

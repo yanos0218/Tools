@@ -6,7 +6,7 @@
 ## 1. 구성
 
 | 파일 | 용도 |
-|---|---|
+| --- | --- |
 | `n2sf_u2404_hardening.sh` | 조치 스크립트 (점검 / 조치 / 검증 / 롤백) |
 | `n2sf_hardening.conf` | 설정 파일 (6대 공통, 하단 `case` 블록으로 호스트별 값 지정). root 소유 600 |
 | `make_pwq_bundle.sh` | 폐쇄망 U-02용 .deb 9개 번들 생성 (인터넷 되는 Ubuntu 24.04에서 실행) |
@@ -16,7 +16,7 @@
 ## 2. 사전 준비 (반드시 결정해야 하는 값)
 
 | 설정 | 항목 | 내용 | 미입력 시 |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `MGMT_ALLOW_NETS` | U-28 | 관리자 SSH 허용 대역 (ACL 수집 결과) | 수동확인 |
 | `SNMP_MODE` (+ v3 계정, `SNMP_NMS_HOSTS`) | U-58~61 | `disable` / `v3` / `v3v2c` | 대화형 선택, 무인 실행이면 수동확인 |
 | `BANNER_FILE` | U-62 | 기관 지정 경고 문구 | 기본 경고문 적용 |
@@ -75,7 +75,7 @@ sudo ./n2sf_u2404_hardening.sh --check
 ### 옵션
 
 | 옵션 | 설명 |
-|---|---|
+| --- | --- |
 | `--check` | 점검만 수행 (변경 없음). 점검이 끝나면 종료코드 0 |
 | `--strict` | `--check` 와 함께만 사용: 취약 항목이 있으면 종료코드 3 (자동화에서 취약 여부 판별용) |
 | `--yes`, `-y` | 확인 질문과 안전 게이트 자동 승인 (**콘솔 확보 시에만**) |
@@ -96,7 +96,7 @@ sudo ./n2sf_u2404_hardening.sh --check
 ### 종료 코드
 
 | 코드 | 의미 |
-|---|---|
+| --- | --- |
 | 0 | 정상 (`--check` 는 취약이 있어도 점검이 끝나면 0) |
 | 1 | 옵션/환경 오류 (아무 변경 없음) |
 | 2 | 조치 중 실패 또는 롤백 발생 |
@@ -119,7 +119,7 @@ sudo ./n2sf_u2404_hardening.sh --check
 ## 4. 항목별 조치 내용
 
 | 코드 | 조치 | 운영 영향 / 주의 |
-|---|---|---|
+| --- | --- | --- |
 | U-01 | `PermitRootLogin no` (sshd_config + drop-in 중복 정리) | root SSH 불가 → 일반계정+sudo |
 | U-02 | login.defs MIN 1/MAX 90/WARN 7, 기존 계정 chage (만료까지 남은 일수를 증적에 기록, 30일 이내면 경고), pwquality(8자·숫자·영문·특수, enforce_for_root), pwhistory remember=4 | **PEP 예외**(pam_pribit.so). 마지막 변경 후 90일 이상 지난 계정은 MAX 적용을 보류하고 경고만 표시 (즉시 만료 방지) |
 | U-03 | pam_faillock deny=5, unlock 300s (pam-auth-update 프로파일) | PEP는 이미 양호. pam_pribit 스택은 수정하지 않음. 잠금 해제: `faillock --user <id> --reset` |
@@ -143,7 +143,7 @@ sudo ./n2sf_u2404_hardening.sh --check
 `/root/n2sf_hardening/<호스트>_<일시>/`
 
 | 파일 | 내용 |
-|---|---|
+| --- | --- |
 | `result_<호스트>.csv` | 조치 전/후, 결과, **이행점검(Y/P/N/예외)** 값 → '이행 진단 결과 요약' 시트에 바로 기입 |
 | `evidence/U-xx.txt` | 항목별 사전/사후 증적 (설정값, 권한, 명령 결과) |
 | `run.log` | 실행 로그 |
