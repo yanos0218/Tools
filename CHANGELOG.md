@@ -27,4 +27,5 @@
 ### Changed
 
 - vulnerability 2.0.0: 이름 일반화(상세는 [vulnerability/CHANGELOG.md](vulnerability/CHANGELOG.md)). CI 테스트 경로를 `/opt/vuln` 으로 변경함.
+- vulnerability README를 입구로 줄이고 사용법·항목별 조치·결과물·원복 문서를 `vulnerability/docs/`로 분리함. 루트 README 문서 목록에 링크를 추가함.
 - 워크플로를 도구별 파일로 분리하고 경로 필터를 추가함(도구 폴더가 바뀔 때만 해당 검사 실행).

@@ -23,6 +23,12 @@
   - 구조도, 메인·서브 구분, 도구 폴더 규약, 이름 규칙
 - [작업 흐름](docs/workflow.md)
   - 변경 흐름, CI 구조, 로컬 검사, 새 도구 추가 절차
+- [vulnerability 사용법](vulnerability/docs/usage.md)
+  - 사전 준비, 실행 조건, 실행 절차, 옵션, 종료 코드
+- [vulnerability 항목별 조치 내용](vulnerability/docs/items.md)
+  - 항목마다 바뀌는 설정과 운영 영향
+- [vulnerability 결과물·원복·운영 참고](vulnerability/docs/operations.md)
+  - 결과 폴더, 원복, 패치 후 재점검
 - [vulnerability 내부 구조](vulnerability/docs/architecture.md)
   - 파일 구성, 실행 흐름, 항목 처리, 안전 게이트, 원복 구조
 - [CHANGELOG.md](CHANGELOG.md)
