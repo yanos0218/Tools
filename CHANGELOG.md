@@ -29,6 +29,7 @@
 
 - vulnerability 2.0.0: 이름 일반화(상세는 [vulnerability/CHANGELOG.md](vulnerability/CHANGELOG.md)). CI 테스트 경로를 `/opt/vuln` 으로 변경함.
 - vulnerability README를 입구로 줄이고 사용법·항목별 조치·결과물·원복 문서를 `vulnerability/docs/`로 분리함. 루트 README 문서 목록에 링크를 추가함.
+- vulnerability CI에 점검·조치·원복 왕복 시험 job 추가(실험, 실패해도 CI 통과).
 - vulnerability 조치 후 변경 파일 diff 기록과 faillock 안내 추가(#10 일부).
 - vulnerability SNMP 항목 원복 시 표기·원복 대상 불일치 수정(#6).
 - vulnerability U-12 `TMOUT=${TMOUT:-600}` 구문 오류와 U-23 증적의 별도 마운트 누락 수정(#7).
