@@ -1,0 +1,1565 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  N2SF UNIX 서버 보안 취약점 일괄 조치 스크립트 (Ubuntu 24.04 LTS)
+#  - 근거 : 한국부동산원 N2SF 도입지원사업 UNIX 서버 보안점검 상세 결과보고서(2026.10)
+#  - 대상 : INT-SEC-PDP-01/02, INT-SEC-PEP-01/02, EXT-USR-SEC-PEP-01/02
+#  - 기능 : 항목별 [사전점검 → 백업 → 조치 → 대기(delay) → 사후검증 → 결과판정]
+#           위험 항목(SSH/PAM/방화벽) 안전 게이트 + 자동 롤백, 전체/항목 롤백,
+#           결과 CSV(이행점검 Y/P/N 매핑) · 증적 파일 · 로그 생성
+# -----------------------------------------------------------------------------
+#  사용법
+#    sudo ./n2sf_u2404_hardening.sh --check                  # 점검만(변경 없음)
+#    sudo ./n2sf_u2404_hardening.sh                          # 대화형 일괄 조치
+#    sudo ./n2sf_u2404_hardening.sh --yes --delay 5          # 무인 일괄 조치
+#    sudo ./n2sf_u2404_hardening.sh --only U-01,U-62         # 특정 항목만
+#    sudo ./n2sf_u2404_hardening.sh --skip U-28 --role pdp
+#    sudo ./n2sf_u2404_hardening.sh --rollback /root/n2sf_hardening/<host>_<ts>
+#    sudo ./n2sf_u2404_hardening.sh --list
+#  옵션
+#    --check            점검 전용 모드
+#    --yes | -y         확인 질문/안전 게이트 자동 승인(무인 실행)
+#    --step             항목마다 실행 여부 확인
+#    --delay N          항목 간 대기 시간(초, 기본 3)
+#    --wait N           조치 후 사후검증 전 대기 시간(초, 기본 2)
+#    --role pdp|pep     서버 역할 지정(미지정 시 hostname/구성으로 자동 판별)
+#    --config FILE      설정 파일 지정(기본: 스크립트와 같은 경로의 n2sf_hardening.conf)
+#                       설정 파일은 필수입니다. 없으면 점검/조치 모두 실행하지 않고 종료합니다.
+#                       (--rollback, --list, --help 는 설정 파일이 필요 없습니다)
+#    --only LIST        항목만 수행. 콤마/공백 구분, 대소문자 무관 (예: U-01,U-62). 반복 지정 시 누적
+#    --order            --only 로 지정한 순서대로 실행 (기본: 항목번호 순서). 롤백은 manifest 역순
+#    --skip LIST        항목 제외 (형식은 --only 와 동일)
+#    --strict           --check 와 함께 사용: 취약 항목이 있으면 종료코드 3 (기본은 점검이 끝나면 0)
+#  종료코드: 0 정상 / 1 옵션·환경 오류 / 2 실패·롤백 발생 / 3 --check --strict 에서 취약 항목 존재
+#  주의: 조치/원복 모드는 tty 가 없으면 --yes 없이 실행되지 않습니다.
+#    --rollback DIR     지정 백업 디렉터리 기준 전체 원복
+#    --list             조치 대상 항목 목록 출력
+# =============================================================================
+SCRIPT_VERSION="1.1.0 (2026-11-12)"
+# ---- 실행 환경 확인: bash 여부 → root 여부 (어떤 옵션보다 먼저) ----------------
+[ -n "${BASH_VERSION:-}" ] || { echo "오류: bash 로 실행하십시오 (sh 로 실행 불가). 예: sudo bash $0 --check" >&2; exit 1; }
+if [ "$(id -u)" -ne 0 ] || [ "${EUID:-1}" -ne 0 ]; then
+  echo "오류: 이 스크립트는 root 계정에서만 실행할 수 있습니다. (현재 사용자: $(id -un 2>/dev/null), UID=$(id -u))" >&2
+  echo "      'sudo $0 ...' 로 실행하거나 root 로 로그인한 뒤 실행하십시오. (--list, --help 도 root 필요)" >&2
+  exit 1
+fi
+[ "${BASH_VERSINFO[0]:-0}" -ge 4 ] || { echo "오류: bash 4 이상이 필요합니다 (현재 ${BASH_VERSION})." >&2; exit 1; }
+set -o pipefail
+umask 022
+
+# ----------------------------------------------------------------------------
+# 0. 기본 설정값 (n2sf_hardening.conf 에서 재정의 가능)
+# ----------------------------------------------------------------------------
+ROLE="${ROLE:-auto}"                       # auto | pdp | pep
+STEP_DELAY=3                               # 항목 간 대기(초)
+POST_WAIT=2                                # 조치 후 검증 전 대기(초)
+GATE_TIMEOUT=300                           # 안전 게이트 응답 대기(초) - 무응답 시 자동 롤백
+ROLLBACK_ON_FAIL="no"                      # 사후검증 실패 시 해당 항목 자동 원복 여부
+REPORT_BASE="/root/n2sf_hardening"         # 백업/로그/결과 저장 위치
+
+# U-02 비밀번호 정책
+PASS_MIN_DAYS=1
+PASS_MAX_DAYS=90
+PASS_WARN_AGE=7
+PW_MINLEN=8
+PW_DCREDIT=-1                              # 숫자 1자 이상
+PW_LCREDIT=-1                              # 영문(소문자) 1자 이상
+PW_UCREDIT=0
+PW_OCREDIT=-1                              # 특수문자 1자 이상
+PW_MINCLASS=3                              # 문자 종류 3종 이상
+PW_REMEMBER=4                              # 최근 비밀번호 기억 4회
+CHAGE_EXISTING="yes"                       # 기존 계정(root, UID>=1000)에도 사용기간 적용
+CHAGE_FORCE="no"                           # 변경 후 90일 경과 계정도 강제 적용(즉시 만료 위험)
+PWQ_DEB_DIR=""                             # 폐쇄망: libpam-pwquality 등 .deb 보관 경로
+ALLOW_APT="yes"                            # 온라인 apt 설치 시도 여부
+U02_PEP_APPLY="no"                         # PEP(pam_pribit.so) 에도 U-02 강제 적용 여부
+
+# U-03 계정 잠금
+FAILLOCK_DENY=5
+FAILLOCK_UNLOCK=300
+FAILLOCK_EVEN_DENY_ROOT="yes"
+FAILLOCK_ROOT_UNLOCK=300
+
+# U-06 su 제한
+SU_GROUP="wheel"
+SU_GROUP_MEMBERS=""                        # 비우면 sudo/admin 그룹 구성원 자동 등록
+SU_RESTRICT_PERM="yes"                     # /usr/bin/su 4750 root:wheel (dpkg-statoverride)
+
+# U-12 세션 타임아웃
+TMOUT_SEC=600
+
+# U-18
+GSHADOW_TOO="yes"
+
+# U-20 systemd conf 중 비root 데몬이 읽는 파일 처리 방식
+#   dropin   : 유효 설정을 <name>.conf.d/ 로 이관 후 원본 제거 (기능 유지 + 기준 충족) [권장]
+#   chmod    : 일괄 600 (timesyncd/resolved/networkd 설정 읽기 실패 위험)
+#   exception: 644 유지, 예외 처리
+U20_SVC_MODE="dropin"
+
+# U-23 SUID/SGID 제거 대상(존재하고 SUID/SGID 가 있는 경우만 처리)
+SUID_REMOVE_LIST="/usr/bin/newgrp /usr/bin/at /usr/sbin/traceroute /usr/bin/traceroute6.iputils /usr/bin/lpq /usr/bin/lpr /usr/bin/lprm /usr/sbin/lpc /sbin/dump /sbin/restore /usr/sbin/dump /usr/sbin/restore"
+
+# U-28 접근 통제 (필수 입력: 관리망 대역)
+MGMT_ALLOW_NETS=""                         # 예) "10.2.12.0/24 10.2.13.0/24"
+FW_MODE="tcpwrapper"                       # tcpwrapper | iptables | both
+FW_GATE_TIMEOUT=120
+
+# U-58~61 SNMP
+SNMP_MODE=""                               # disable | v3 | v3v2c  (비우면 대화형 선택/수동)
+SNMPV3_USER=""
+SNMPV3_AUTH_PROTO="SHA-256"                # SHA | SHA-256 | SHA-512
+SNMPV3_AUTH_PASS=""
+SNMPV3_PRIV_PROTO="AES"
+SNMPV3_PRIV_PASS=""
+SNMP_V2C_COMMUNITY=""                      # v3v2c 모드: 10자리 이상 영문+숫자 또는 8자리 이상 영문+숫자+특수
+SNMP_NMS_HOSTS=""                          # NMS IP(공백 구분) - 접근제어
+SNMP_AGENT_ADDRESS=""                      # 예) "udp:10.2.12.135:161" (비우면 기존값 유지)
+
+# U-62 로그인 경고 배너
+BANNER_FILE=""                             # 기관 지정 문구 파일(비우면 기본 문구)
+SSH_BANNER_PATH="/etc/issue.net"
+
+# U-64 패치
+PATCH_MODE="report"                        # report | security | full
+
+# U-65 NTP (비우면 IP 대역으로 자동 선택)
+NTP_SERVERS=""
+NTP_MAP="10.2.:10.2.13.19 10.12.:123.141.115.4"
+NTP_FALLBACK=""
+NTP_POLL_MIN=32
+NTP_POLL_MAX=2048
+NTP_SYNC_WAIT=90
+
+# U-66 로깅 정책
+LOG_ENABLE_MESSAGES="no"                   # /var/log/messages 추가 여부(디스크 사용량 증가)
+LOG_ROTATE_COUNT=26                        # rsyslog 로그 보관 주(weekly) 수, 비우면 변경 안 함
+SYSLOG_REMOTE=""                           # 예) "@@10.2.13.50:514" (TCP) / "@10.2.13.50:514" (UDP)
+
+# U-67 로그 파일 소유자
+LOG_EXCLUDE_REGEX='(mysql|redis|mariadb|postgres|pribit|connect)'
+LOG_OWNER_MODE="root-rsyslog"              # root-rsyslog(rsyslog root 구동) | skip
+
+# ----------------------------------------------------------------------------
+# 1. 공통 함수
+# ----------------------------------------------------------------------------
+SCRIPT_PATH="$(readlink -f "$0")"
+SCRIPT_DIR="$(dirname "$SCRIPT_PATH")"
+CONFIG_FILE="$SCRIPT_DIR/n2sf_hardening.conf"
+MODE="apply"; ASSUME_YES=0; STEP_MODE=0; ONLY=""; SKIP=""; RB_DIR=""
+CUR_ID="INIT"; CHK_MSG=""; FIX_MSG=""; CUR_PHASE=pre; SNMP_RC=0
+declare -A BACKED=() PRE_CACHE=() PRE_MSG=()
+SNMP_PRE_DONE=0
+declare -a R_ID=() R_NAME=() R_PRE=() R_POST=() R_STATUS=() R_IMPL=() R_MSG=()
+declare -a GATES_AUTO=() ONLY_ARR=() SKIP_ARR=() PARSED_ARR=() RUN_IDS=()
+declare -A ROLLED=()
+
+if [[ -t 1 ]]; then
+  C_R=$'\e[1;31m'; C_G=$'\e[1;32m'; C_Y=$'\e[1;33m'; C_B=$'\e[1;34m'; C_C=$'\e[1;36m'; C_0=$'\e[0m'
+else C_R=""; C_G=""; C_Y=""; C_B=""; C_C=""; C_0=""; fi
+
+_log(){ local lv=$1; shift; [[ -n ${LOG_FILE:-} ]] && printf '%s [%-5s] [%s] %s\n' "$(date '+%F %T')" "$lv" "$CUR_ID" "$*" >>"$LOG_FILE"; }
+info(){ _log INFO "$*"; printf '  %s•%s %s\n' "$C_B" "$C_0" "$*"; }
+ok(){   _log OK   "$*"; printf '  %s✔%s %s\n' "$C_G" "$C_0" "$*"; }
+warn(){ _log WARN "$*"; printf '  %s▲%s %s\n' "$C_Y" "$C_0" "$*"; }
+err(){  _log ERROR "$*"; printf '  %s✘%s %s\n' "$C_R" "$C_0" "$*" >&2; }
+die(){ err "$*"; exit 1; }
+ev(){ [[ -n ${EVID_DIR:-} ]] && printf '%s\n' "$*" >>"$EVID_DIR/${CUR_ID}.txt"; }
+evcmd(){ [[ -n ${EVID_DIR:-} ]] || return 0; { printf '$ %s\n' "$*"; "$@" 2>&1; echo; } >>"$EVID_DIR/${CUR_ID}.txt"; }
+have(){ command -v "$1" >/dev/null 2>&1; }
+has_libwrap(){ local b; b=$(command -v "$1" 2>/dev/null || echo "$1"); [[ -x $b ]] && ldd "$b" 2>/dev/null | grep -q libwrap; }
+has_systemd(){ [[ -d /run/systemd/system ]]; }
+svc_active(){ has_systemd && systemctl is-active --quiet "$1" 2>/dev/null; }
+svc_exists(){ has_systemd && systemctl list-unit-files "$1" --no-legend 2>/dev/null | grep -q .; }
+
+pause(){
+  local s=${1:-$STEP_DELAY} i
+  (( s > 0 )) || return 0
+  if [[ -t 1 ]]; then
+    for ((i=s; i>0; i--)); do printf '\r  %s⏳ 대기 %2ds%s ' "$C_C" "$i" "$C_0"; sleep 1; done; printf '\r%30s\r' ''
+  else sleep "$s"; fi
+}
+
+ask_yn(){ # $1 질문, $2 기본값(y/n)
+  local q=$1 d=${2:-n} a
+  (( ASSUME_YES )) && return 0
+  [[ -t 0 ]] || { [[ $d == y ]]; return; }
+  read -r -p "  ? $q [$( [[ $d == y ]] && echo Y/n || echo y/N )] " a
+  a=${a:-$d}; [[ $a =~ ^[Yy] ]]
+}
+
+# 안전 게이트: 사용자가 정상 확인(y)해야 유지, 그 외/시간초과 시 롤백
+gate(){
+  local msg=$1 t=${2:-$GATE_TIMEOUT} a=""
+  if (( ASSUME_YES )); then GATES_AUTO+=("$CUR_ID"); info "안전 게이트 자동 승인(--yes): $msg"; return 0; fi
+  [[ -t 0 ]] || { warn "비대화형 세션에서는 안전 게이트를 승인할 수 없음 → 원복 처리: $msg"; return 1; }
+  printf '\n  %s┌─ 안전 게이트 ─────────────────────────────────────────────%s\n' "$C_Y" "$C_0"
+  printf '  %s│%s %s\n' "$C_Y" "$C_0" "$msg"
+  printf '  %s│%s 현재 세션은 끊지 말고, 새 터미널에서 확인하십시오.\n' "$C_Y" "$C_0"
+  printf '  %s└──────────────────────────────────────────────────────────%s\n' "$C_Y" "$C_0"
+  read -r -t "$t" -p "  ? 정상 확인되었습니까? [y/N] (${t}s 무응답 시 자동 원복) " a || { echo; a=""; }
+  [[ $a =~ ^[Yy] ]]
+}
+
+perm_ok(){ # file max_octal → 0 if mode <= max (특수비트 포함 비교)
+  local m; m=$(stat -c '%a' "$1" 2>/dev/null) || return 1
+  (( (8#$m & ~8#$2 & 8#7777) == 0 ))
+}
+fstat(){ stat -c '%A %a %U:%G %n' "$1" 2>/dev/null; }
+
+# ---- 백업 / 원복 기록 --------------------------------------------------------
+backup_file(){ # 내용 변경 전 원본 보관 (항목별 1회)
+  local f=$1 k="$CUR_ID|$1"
+  [[ -n ${BACKED[$k]:-} ]] && return 0
+  BACKED[$k]=1
+  if [[ -e $f ]]; then
+    mkdir -p "$BK_DIR/files/$CUR_ID$(dirname "$f")"
+    cp -a "$f" "$BK_DIR/files/$CUR_ID$f"
+    echo "FILE|$CUR_ID|$f|1" >>"$MANIFEST"
+  else
+    echo "FILE|$CUR_ID|$f|0" >>"$MANIFEST"
+  fi
+}
+record_mode(){ local f=$1; [[ -e $f ]] || return 0; echo "MODE|$CUR_ID|$f|$(stat -c '%a|%U|%G' "$f")" >>"$MANIFEST"; }
+record_undo(){ echo "CMD|$CUR_ID|$*" >>"$MANIFEST"; }
+record_svc(){
+  local u=$1 en ac
+  en=$(systemctl is-enabled "$u" 2>/dev/null | head -1); ac=$(systemctl is-active "$u" 2>/dev/null | head -1)
+  echo "SVC|$CUR_ID|$u|${en:-unknown}|${ac:-unknown}" >>"$MANIFEST"
+}
+record_chage(){
+  local u=$1 l; l=$(getent shadow "$u") || return 0
+  IFS=: read -r _ _ _ mn mx wn _ <<<"$l"
+  echo "CHAGE|$CUR_ID|$u|${mn:--1}|${mx:--1}|${wn:--1}" >>"$MANIFEST"
+}
+set_statovr(){ # path owner group mode
+  local p=$1 o=$2 g=$3 m=$4 prev
+  prev=$(dpkg-statoverride --list "$p" 2>/dev/null)
+  record_mode "$p"
+  echo "STATOVR|$CUR_ID|$p|${prev:-NONE}" >>"$MANIFEST"
+  dpkg-statoverride --remove "$p" >/dev/null 2>&1
+  if ! dpkg-statoverride --update --add "$o" "$g" "$m" "$p" 2>>"$LOG_FILE"; then
+    chown "$o:$g" "$p" && chmod "$m" "$p"
+  fi
+}
+
+do_rollback(){ # $1=백업디렉터리 $2=항목(옵션)
+  local dir=$1 only=${2:-} type id a b c d line
+  local man="$dir/manifest"
+  [[ -f $man ]] || { err "manifest 없음: $man"; return 1; }
+  local rolled; rolled=$(awk -F'|' '$1=="ROLLEDBACK"{print $2}' "$man")
+  tac "$man" | while IFS= read -r line; do
+    IFS='|' read -r type id a b c d <<<"$line"
+    [[ $type == ROLLEDBACK ]] && continue
+    [[ -n $only && $id != "$only" ]] && continue
+    [[ -z $only ]] && grep -qxF "$id" <<<"$rolled" && continue
+    case $type in
+      FILE)
+        if [[ $b == 1 ]]; then mkdir -p "$(dirname "$a")"; cp -a "$dir/files/$id$a" "$a" && echo "    [원복] $a"
+        else rm -f "$a" && echo "    [삭제] $a"; fi ;;
+      MODE)  chown "$c:$d" "$a" 2>/dev/null; chmod "$b" "$a" 2>/dev/null && echo "    [권한] $a → $b $c:$d" ;;
+      STATOVR)
+        dpkg-statoverride --remove "$a" >/dev/null 2>&1
+        if [[ $b != NONE ]]; then read -r so sg sm sp <<<"$b"; dpkg-statoverride --add "$so" "$sg" "$sm" "$sp" >/dev/null 2>&1; fi
+        echo "    [statoverride] $a" ;;
+      SVC)
+        if [[ $b == enabled ]]; then systemctl enable "$a" >/dev/null 2>&1; elif [[ $b == disabled ]]; then systemctl disable "$a" >/dev/null 2>&1; fi
+        if [[ $c == active ]]; then systemctl start "$a" >/dev/null 2>&1; else systemctl stop "$a" >/dev/null 2>&1; fi
+        echo "    [서비스] $a → $b/$c" ;;
+      CHAGE) chage -m "$b" -M "$c" -W "$d" "$a" 2>/dev/null && echo "    [chage] $a → min=$b max=$c warn=$d" ;;
+      CMD)   bash -c "${line#CMD|$id|}" >/dev/null 2>&1; echo "    [명령] ${line#CMD|$id|}" ;;
+    esac
+  done
+  if [[ -n $only ]]; then echo "ROLLEDBACK|$only" >>"$man"
+  else # 전체 원복: 처리한 모든 항목에 완료 표식 → 같은 rollback.sh 를 다시 실행해도 이후 변경을 덮어쓰지 않음
+    awk -F'|' '$1!="ROLLEDBACK" && $2!="" {print $2}' "$man" | sort -u | while read -r id; do
+      grep -qxF "$id" <<<"$rolled" || echo "ROLLEDBACK|$id" >>"$man"; done
+  fi
+  return 0
+}
+rollback_item(){ ROLLED[$CUR_ID]=1; warn "[$CUR_ID] 항목 원복 수행"; do_rollback "$BK_DIR" "$CUR_ID" | tee -a "$LOG_FILE"; post_rollback_refresh; }
+post_rollback_refresh(){
+  mkdir -p /run/sshd 2>/dev/null
+  if have sshd && sshd -t 2>/dev/null; then systemctl try-reload-or-restart ssh.service >/dev/null 2>&1; fi
+  if has_systemd; then
+    for u in rsyslog.service systemd-timesyncd.service snmpd.service; do systemctl try-restart "$u" >/dev/null 2>&1; done
+  fi
+}
+
+# ---- 설정 파일 편집 ---------------------------------------------------------
+# set_conf FILE KEY VALUE [SEP]  : 활성 KEY 라인 교체(중복은 주석), 없으면 추가. 권한/소유자 유지
+set_conf(){
+  local f=$1 k=$2 v=$3 sep=${4:- }
+  backup_file "$f"; [[ -e $f ]] || { : >"$f"; chmod 644 "$f"; }
+  awk -v k="$k" -v nl="${k}${sep}${v}" '
+    function iskey(t,  r){ if (index(t,k)!=1) return 0; r=substr(t,length(k)+1); return (r=="" || r ~ /^[ \t=]/) }
+    { t=$0; sub(/^[ \t]+/,"",t)
+      if (iskey(t)) { if (!d) { print nl; d=1; next } else { print "# [N2SF] " $0; next } }
+      print }
+    END{ if(!d) print nl }' "$f" >"$f.n2sf.tmp" && cat "$f.n2sf.tmp" >"$f"; rm -f "$f.n2sf.tmp"
+}
+set_flag(){ # FILE FLAG : 단독 키워드(enforce_for_root 등) 활성화
+  local f=$1 k=$2
+  backup_file "$f"; [[ -e $f ]] || { : >"$f"; chmod 644 "$f"; }
+  grep -qE "^[[:space:]]*${k}[[:space:]]*$" "$f" || echo "$k" >>"$f"
+}
+get_kv(){ # FILE KEY → 값 ("k = v" / "k v")
+  [[ -f $1 ]] || return 0
+  awk -v k="$2" '{t=$0; sub(/^[ \t]+/,"",t); if(index(t,k)==1){r=substr(t,length(k)+1); if(r ~ /^[ \t]*=/ || r ~ /^[ \t]+/){sub(/^[ \t]*=?[ \t]*/,"",r); sub(/[ \t#].*$/,"",r); v=r}}} END{print v}' "$1"
+}
+pam_arg(){ # "pam line" key → value
+  grep -oE "(^|[[:space:]])$2=[^[:space:]]+" <<<"$1" | head -1 | cut -d= -f2
+}
+pam_mod_path(){ ls /usr/lib/*/security/"$1" /lib/*/security/"$1" /lib/security/"$1" 2>/dev/null | head -1; }
+pam_lint(){ # 지정 PAM 파일들의 모듈 존재 여부 확인
+  local f line m bad=0
+  for f in "$@"; do
+    [[ -f $f ]] || continue
+    while IFS= read -r line; do
+      [[ $line =~ ^[[:space:]]*(#|$|@include) ]] && continue
+      [[ $line =~ ^[[:space:]]*- ]] && continue
+      m=$(sed -E 's/^[[:space:]]*(auth|account|password|session)[[:space:]]+(\[[^]]*\]|[^[:space:]]+)[[:space:]]+([^[:space:]]+).*/\3/' <<<"$line")
+      [[ $m == "$line" ]] && continue
+      if [[ $m == /* ]]; then [[ -f $m ]] || { err "PAM 모듈 없음: $m ($f)"; bad=1; }
+      else [[ -n $(pam_mod_path "$m") ]] || { err "PAM 모듈 없음: $m ($f)"; bad=1; }; fi
+    done <"$f"
+  done
+  return $bad
+}
+pam_custom_stack(){ grep -lsE '^[^#]*pam_pribit' /etc/pam.d/common-* /etc/pam.d/sshd /etc/pam.d/login 2>/dev/null | head -1; }
+pam_backup_all(){
+  local f
+  for f in /etc/pam.d/common-auth /etc/pam.d/common-account /etc/pam.d/common-password /etc/pam.d/common-session /etc/pam.d/common-session-noninteractive /var/lib/pam/*; do
+    [[ -f $f ]] && backup_file "$f"
+  done
+}
+pam_update(){ # profile 활성화
+  DEBIAN_FRONTEND=noninteractive pam-auth-update --enable "$@" >>"$LOG_FILE" 2>&1
+}
+
+# ---- SSH --------------------------------------------------------------------
+sshd_eff(){ mkdir -p /run/sshd 2>/dev/null; sshd -T 2>/dev/null | awk -v k="$(tr '[:upper:]' '[:lower:]' <<<"$1")" '$1==k{$1=""; sub(/^ /,""); print; exit}'; }
+sshd_set(){ # KEY VALUE : drop-in 중복 주석 처리 + 본 파일 Match 이전 위치에 설정
+  local key=$1 val=$2 main=/etc/ssh/sshd_config f lk
+  lk=$(tr '[:upper:]' '[:lower:]' <<<"$key")
+  for f in /etc/ssh/sshd_config.d/*.conf; do
+    [[ -f $f ]] || continue
+    if grep -qiE "^[[:space:]]*${key}[[:space:]]" "$f"; then
+      backup_file "$f"
+      awk -v k="$lk" -v tag="# [N2SF $CUR_ID] " '{l=tolower($0)} l ~ "^[ \t]*" k "[ \t]" {print tag $0; next} {print}' "$f" >"$f.tmp" && cat "$f.tmp" >"$f"; rm -f "$f.tmp"
+    fi
+  done
+  backup_file "$main"
+  awk -v k="$lk" -v tag="# [N2SF $CUR_ID] " -v nl="$key $val" '
+    {l=tolower($0)}
+    l ~ /^[ \t]*match[ \t]/ { if(!d){print nl "    # N2SF"; d=1}; m=1 }
+    !m && l ~ "^[ \t]*" k "[ \t]" { print tag $0; next }
+    {print}
+    END{ if(!d) print nl "    # N2SF" }' "$main" >"$main.tmp" && cat "$main.tmp" >"$main"; rm -f "$main.tmp"
+}
+ssh_reload(){
+  mkdir -p /run/sshd 2>/dev/null
+  if ! sshd -t 2>>"$LOG_FILE"; then err "sshd -t 구문 검사 실패"; return 1; fi
+  if has_systemd; then systemctl try-reload-or-restart ssh.service >>"$LOG_FILE" 2>&1 || systemctl restart ssh >>"$LOG_FILE" 2>&1; fi
+  return 0
+}
+login_users(){ awk -F: '($3==0 || ($3>=1000 && $3!=65534)) && $7 !~ /(nologin|false|sync|shutdown|halt)$/ {print $1}' /etc/passwd; }
+sudo_users(){ getent group sudo admin 2>/dev/null | cut -d: -f4 | tr ',' '\n' | sed '/^$/d' | sort -u; }
+
+# ---- 네트워크 계산 ----------------------------------------------------------
+ip2int(){ local IFS=.; read -r a b c d <<<"$1"; echo $(( (a<<24)+(b<<16)+(c<<8)+d )); }
+ip_in_cidr(){ # ip cidr
+  local ip=$1 net=${2%/*} len=${2#*/}; [[ $2 == */* ]] || len=32
+  local mask=$(( len==0 ? 0 : (0xFFFFFFFF << (32-len)) & 0xFFFFFFFF ))
+  (( ( $(ip2int "$ip") & mask ) == ( $(ip2int "$net") & mask ) ))
+}
+cidr_tcpw(){ # 10.2.0.0/16 → 10.2.0.0/255.255.0.0 (tcp_wrappers 형식)
+  local net=${1%/*} len=${1#*/}; [[ $1 == */* ]] || { echo "$1"; return; }
+  local m=$(( len==0 ? 0 : (0xFFFFFFFF << (32-len)) & 0xFFFFFFFF ))
+  echo "$net/$(( (m>>24)&255 )).$(( (m>>16)&255 )).$(( (m>>8)&255 )).$(( m&255 ))"
+}
+ssh_peers(){ ss -tnH state established 2>/dev/null | awk -v p=":$(sshd_eff port | head -1)" '$3 ~ p"$" {print $4}' | sed -E 's/^\[?(::ffff:)?//; s/\]?:[0-9]+$//' | sort -u; }
+primary_ip(){ ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src"){print $(i+1); exit}}'; }
+
+# ----------------------------------------------------------------------------
+# 2. 항목 정의
+# ----------------------------------------------------------------------------
+ITEMS=(
+"U-01|root 계정 원격 접속 제한"
+"U-02|비밀번호 관리정책 설정"
+"U-03|계정 잠금 임계값 설정"
+"U-06|사용자 계정 su 기능 제한"
+"U-12|세션 종료 시간 설정"
+"U-18|/etc/shadow 파일 소유자 및 권한 설정"
+"U-20|/etc/(x)inetd.conf(systemd) 파일 소유자 및 권한 설정"
+"U-21|/etc/(r)syslog.conf 파일 소유자 및 권한 설정"
+"U-23|SUID, SGID, Sticky bit 설정 파일 점검"
+"U-28|접속 IP 및 포트 제한"
+"U-37|crontab 설정파일 권한 설정"
+"U-58|불필요한 SNMP 서비스 구동 점검"
+"U-59|안전한 SNMP 버전 사용"
+"U-60|SNMP Community String 복잡성 설정"
+"U-61|SNMP Access Control 설정"
+"U-62|로그인 시 경고 메시지 설정"
+"U-64|주기적 보안 패치 및 벤더 권고사항 적용"
+"U-65|NTP 및 시각 동기화 설정"
+"U-66|정책에 따른 시스템 로깅 설정"
+"U-67|로그 디렉터리 소유자 및 권한 설정"
+)
+
+# 역할 기반 예외 (보고서 비고란 근거)
+exception_reason(){
+  case $1 in
+    U-02) if [[ $ROLE == pep && $U02_PEP_APPLY != yes ]]; then
+            echo "PEP(Gateway)는 pam_pribit.so 자체 인증모듈 사용 - PDP(Controller)만 반영 가능(점검보고서 비고)"; fi ;;
+  esac
+}
+
+# ============================ U-01 ==========================================
+chk_U01(){
+  have sshd || { CHK_MSG="openssh-server 미설치"; return 0; }
+  local eff main; eff=$(sshd_eff PermitRootLogin)
+  main=$(grep -iE '^[[:space:]]*PermitRootLogin[[:space:]]' /etc/ssh/sshd_config | head -1)
+  ev "sshd -T permitrootlogin = ${eff:-?}"; ev "sshd_config: ${main:-(설정 없음)}"
+  grep -isE '^[[:space:]]*PermitRootLogin' /etc/ssh/sshd_config.d/*.conf | while read -r l; do ev "drop-in: $l"; done
+  ev "telnet: $(svc_active telnet.socket && echo active || echo inactive) / inetd: $(svc_active inetd && echo active || echo inactive)"
+  CHK_MSG="PermitRootLogin(유효)=${eff:-?}"
+  [[ $eff == no && ${main,,} =~ permitrootlogin[[:space:]]+no ]]
+}
+fix_U01(){
+  local admins; admins=$(sudo_users | while read -r u; do id "$u" >/dev/null 2>&1 && [[ $(getent passwd "$u" | cut -d: -f7) != *nologin ]] && echo "$u"; done | tr '\n' ' ')
+  if [[ -z ${admins// } ]]; then
+    FIX_MSG="sudo 권한 일반 계정이 없어 root 원격 차단 시 원격 관리 불가 → 관리계정 생성 후 재실행"; return 20
+  fi
+  info "원격 관리용 sudo 계정: $admins"
+  sshd_set PermitRootLogin no
+  ssh_reload || { rollback_item; FIX_MSG="sshd 구문 오류로 원복"; return 1; }
+  if ! gate "새 터미널에서 일반계정($admins)으로 SSH 로그인 → 'sudo -i' 성공 여부를 확인하십시오."; then
+    rollback_item; FIX_MSG="안전 게이트 미승인 → 원복"; return 30
+  fi
+  FIX_MSG="PermitRootLogin no 적용(sshd_config + drop-in 정리)"; return 0
+}
+
+# ============================ U-02 ==========================================
+chk_U02(){
+  local okf=1 mn mx pl pwq_min dc lc uc oc mc pwh rem efr u l
+  mn=$(awk '$1=="PASS_MIN_DAYS"{v=$2} END{print v}' /etc/login.defs)
+  mx=$(awk '$1=="PASS_MAX_DAYS"{v=$2} END{print v}' /etc/login.defs)
+  ev "[login.defs] PASS_MIN_DAYS=${mn:-미설정} PASS_MAX_DAYS=${mx:-미설정} PASS_WARN_AGE=$(awk '$1=="PASS_WARN_AGE"{print $2}' /etc/login.defs)"
+  (( ${mn:-0} >= PASS_MIN_DAYS )) || okf=0
+  (( ${mx:-99999} > 0 && ${mx:-99999} <= PASS_MAX_DAYS )) || okf=0
+  pl=$(grep -E '^[[:space:]]*password[[:space:]].*pam_pwquality\.so' /etc/pam.d/common-password | head -1)
+  ev "[common-password pwquality] ${pl:-없음}"
+  if [[ -z $pl ]]; then okf=0; else
+    local C=/etc/security/pwquality.conf
+    pwq_min=$(pam_arg "$pl" minlen); pwq_min=${pwq_min:-$(get_kv $C minlen)}
+    dc=$(pam_arg "$pl" dcredit); dc=${dc:-$(get_kv $C dcredit)}
+    lc=$(pam_arg "$pl" lcredit); lc=${lc:-$(get_kv $C lcredit)}
+    uc=$(pam_arg "$pl" ucredit); uc=${uc:-$(get_kv $C ucredit)}
+    oc=$(pam_arg "$pl" ocredit); oc=${oc:-$(get_kv $C ocredit)}
+    mc=$(pam_arg "$pl" minclass); mc=${mc:-$(get_kv $C minclass)}
+    ev "[pwquality] minlen=${pwq_min:-0} dcredit=${dc:-0} lcredit=${lc:-0} ucredit=${uc:-0} ocredit=${oc:-0} minclass=${mc:-0} enforce_for_root=$(grep -qE '^[[:space:]]*enforce_for_root' $C 2>/dev/null || grep -q enforce_for_root <<<"$pl"; [[ $? == 0 ]] && echo Y || echo N)"
+    (( ${pwq_min:-0} >= PW_MINLEN )) || okf=0
+    (( ${dc:-0} <= -1 && ${oc:-0} <= -1 )) || okf=0
+    (( ${lc:-0} <= -1 || ${uc:-0} <= -1 || ${mc:-0} >= 3 )) || okf=0
+    { grep -qE '^[[:space:]]*enforce_for_root' $C 2>/dev/null || grep -q enforce_for_root <<<"$pl"; } || okf=0
+  fi
+  pwh=$(grep -E '^[[:space:]]*password[[:space:]].*pam_pwhistory\.so' /etc/pam.d/common-password | head -1)
+  ev "[common-password pwhistory] ${pwh:-없음}"
+  if [[ -z $pwh ]]; then okf=0; else
+    rem=$(pam_arg "$pwh" remember); rem=${rem:-$(get_kv /etc/security/pwhistory.conf remember)}
+    efr=$(grep -q enforce_for_root <<<"$pwh" && echo Y); [[ -z $efr ]] && grep -qE '^[[:space:]]*enforce_for_root' /etc/security/pwhistory.conf 2>/dev/null && efr=Y
+    ev "[pwhistory] remember=${rem:-0} enforce_for_root=${efr:-N}"
+    (( ${rem:-0} >= PW_REMEMBER )) && [[ $efr == Y ]] || okf=0
+  fi
+  if [[ $CHAGE_EXISTING == yes ]]; then
+    for u in $(login_users); do
+      l=$(getent shadow "$u") || continue; IFS=: read -r _ pw lst mn2 mx2 _ <<<"$l"
+      [[ $pw == '!'* || $pw == '*' ]] && { ev "[chage] $u : 비밀번호 잠금/미사용(대상 제외)"; continue; }
+      ev "[chage] $u : min=${mn2:-} max=${mx2:-} (최종변경 $(( $(date +%s)/86400 - ${lst:-0} ))일 경과)"
+      (( ${mn2:-0} >= PASS_MIN_DAYS && ${mx2:-99999} > 0 && ${mx2:-99999} <= PASS_MAX_DAYS )) || okf=0
+    done
+  fi
+  CHK_MSG="MIN=${mn:-?} MAX=${mx:-?} minlen=${pwq_min:-0} remember=${rem:-0}"
+  (( okf ))
+}
+fix_U02(){
+  local part=0 u l lst age pwq
+  set_conf /etc/login.defs PASS_MIN_DAYS "$PASS_MIN_DAYS" $'\t'
+  set_conf /etc/login.defs PASS_MAX_DAYS "$PASS_MAX_DAYS" $'\t'
+  set_conf /etc/login.defs PASS_WARN_AGE "$PASS_WARN_AGE" $'\t'
+  ok "login.defs: MIN=$PASS_MIN_DAYS MAX=$PASS_MAX_DAYS WARN=$PASS_WARN_AGE"
+  if [[ $CHAGE_EXISTING == yes ]]; then
+    for u in $(login_users); do
+      l=$(getent shadow "$u") || continue; IFS=: read -r _ pw lst _ <<<"$l"
+      [[ $pw == '!'* || $pw == '*' ]] && continue
+      age=$(( $(date +%s)/86400 - ${lst:-0} ))
+      record_chage "$u"
+      if (( age >= PASS_MAX_DAYS )) && [[ $CHAGE_FORCE != yes ]]; then
+        chage -m "$PASS_MIN_DAYS" -W "$PASS_WARN_AGE" "$u"
+        warn "$u : 비밀번호 변경 후 ${age}일 경과 → MAX 적용 시 즉시 만료되므로 보류(비밀번호 변경 후 재실행)"; part=1
+      else
+        chage -m "$PASS_MIN_DAYS" -M "$PASS_MAX_DAYS" -W "$PASS_WARN_AGE" "$u"
+        ev "[만료 예정] $u : 비밀번호 만료까지 $((PASS_MAX_DAYS - age))일 (최종변경 ${age}일 경과)"
+        (( PASS_MAX_DAYS - age <= 30 )) && warn "$u : $((PASS_MAX_DAYS - age))일 후 비밀번호 만료 예정 - 서비스/자동화 계정이면 사전 변경 필요"
+        ok "chage $u : min=$PASS_MIN_DAYS max=$PASS_MAX_DAYS"
+      fi
+    done
+  fi
+  if [[ -n $(pam_custom_stack) ]]; then
+    FIX_MSG="사용기간 적용 완료 / PAM(pam_pribit) 커스텀 스택이라 복잡도·이력 적용 보류"; return 21
+  fi
+  # 롤백은 manifest 역순 처리 → 패키지 제거(CMD)는 PAM 파일 백업(FILE)보다 '먼저' 기록해야 PAM 복원 '후'에 제거됨
+  record_undo "[ -f '$BK_DIR/.pwq_installed' ] && DEBIAN_FRONTEND=noninteractive apt-get remove -y libpam-pwquality"
+  pam_backup_all
+  # pwquality 모듈 확보
+  if [[ -z $(pam_mod_path pam_pwquality.so) ]]; then
+    if [[ -n $PWQ_DEB_DIR && -d $PWQ_DEB_DIR ]]; then
+      info "오프라인 패키지 설치: $PWQ_DEB_DIR"
+      DEBIAN_FRONTEND=noninteractive dpkg -i "$PWQ_DEB_DIR"/*.deb >>"$LOG_FILE" 2>&1 \
+        || warn "dpkg 설치 실패 - 의존성 누락 가능(make_pwq_bundle.sh 로 만든 9개 .deb 번들 사용, run.log 참조)"
+    elif [[ $ALLOW_APT == yes ]]; then
+      info "libpam-pwquality 설치 시도(apt, 최대 180s)"
+      DEBIAN_FRONTEND=noninteractive timeout 180 apt-get install -y -q libpam-pwquality >>"$LOG_FILE" 2>&1
+    fi
+    [[ -n $(pam_mod_path pam_pwquality.so) ]] && : >"$BK_DIR/.pwq_installed"
+  fi
+  pwq=$(pam_mod_path pam_pwquality.so)
+  if [[ -n $pwq ]]; then
+    local C=/etc/security/pwquality.conf
+    set_conf $C minlen "$PW_MINLEN" " = "; set_conf $C dcredit "$PW_DCREDIT" " = "
+    set_conf $C lcredit "$PW_LCREDIT" " = "; set_conf $C ucredit "$PW_UCREDIT" " = "
+    set_conf $C ocredit "$PW_OCREDIT" " = "; set_conf $C minclass "$PW_MINCLASS" " = "
+    set_conf $C retry 3 " = "; set_flag $C enforce_for_root
+    if ! compgen -G '/var/cache/cracklib/cracklib_dict.pw*' >/dev/null; then
+      set_conf $C dictcheck 0 " = "
+      warn "cracklib 사전 없음(wamerican 미설치) → dictcheck=0 적용(미설정 시 비밀번호 변경이 실패할 수 있음). 사전 설치 후 dictcheck 줄 제거 권장"
+    fi
+    grep -qE '^[[:space:]]*password.*pam_pwquality' /etc/pam.d/common-password || pam_update pwquality
+    if ! grep -qE '^[[:space:]]*password.*pam_pwquality' /etc/pam.d/common-password; then
+      awk '!d && /^[ \t]*password.*pam_unix\.so/ {print "password\trequisite\t\t\tpam_pwquality.so retry=3"; d=1} {print}' /etc/pam.d/common-password >"$BK_DIR/.n2sf.cp" && cat "$BK_DIR/.n2sf.cp" >/etc/pam.d/common-password
+      warn "pam-auth-update 미적용(로컬 수정 감지) → common-password 직접 삽입"
+    fi
+    ok "pwquality: minlen=$PW_MINLEN d/l/o credit=-1 minclass=$PW_MINCLASS enforce_for_root"
+  else
+    warn "pam_pwquality.so 확보 실패(폐쇄망) → PWQ_DEB_DIR 지정 필요. 임시로 pam_unix minlen=$PW_MINLEN 적용"
+    sed -i -E "/^[[:space:]]*password.*pam_unix\.so/ { /minlen=/! s/(pam_unix\.so)/\1 minlen=$PW_MINLEN/ }" /etc/pam.d/common-password
+    part=1
+  fi
+  # pwhistory
+  [[ -f /etc/security/pwhistory.conf ]] && { set_conf /etc/security/pwhistory.conf remember "$PW_REMEMBER" " = "; set_flag /etc/security/pwhistory.conf enforce_for_root; }
+  local P=/usr/share/pam-configs/n2sf-pwhistory; backup_file "$P"
+  cat >"$P" <<EOF
+Name: N2SF U-02 password history (pam_pwhistory remember=$PW_REMEMBER)
+Default: yes
+Priority: 512
+Password-Type: Primary
+Password:
+	requisite			pam_pwhistory.so remember=$PW_REMEMBER enforce_for_root use_authtok
+Password-Initial:
+	requisite			pam_pwhistory.so remember=$PW_REMEMBER enforce_for_root
+EOF
+  chmod 644 "$P"
+  pam_update n2sf-pwhistory
+  if ! grep -qE '^[[:space:]]*password.*pam_pwhistory' /etc/pam.d/common-password; then
+    local ua=""; grep -qE '^[[:space:]]*password.*pam_pwquality' /etc/pam.d/common-password && ua=" use_authtok"
+    awk -v l="password\trequisite\t\t\tpam_pwhistory.so remember=$PW_REMEMBER enforce_for_root$ua" '!d && /^[ \t]*password.*pam_unix\.so/ {print l; d=1} {print}' /etc/pam.d/common-password >"$BK_DIR/.n2sf.cp" && cat "$BK_DIR/.n2sf.cp" >/etc/pam.d/common-password
+    warn "pwhistory 직접 삽입"
+  fi
+  rm -f "$BK_DIR/.n2sf.cp"
+  pam_lint /etc/pam.d/common-password /etc/pam.d/common-auth /etc/pam.d/common-account || { rollback_item; FIX_MSG="PAM 구문 오류 → 원복"; return 1; }
+  evcmd grep -vE '^\s*(#|$)' /etc/pam.d/common-password
+  ok "pwhistory: remember=$PW_REMEMBER enforce_for_root"
+  (( part )) && { FIX_MSG="일부 보류(로그 참조)"; return 21; }
+  FIX_MSG="login.defs/chage/pwquality/pwhistory 적용"; return 0
+}
+
+# ============================ U-03 ==========================================
+chk_U03(){
+  local lines deny cf
+  lines=$(grep -E '^[[:space:]]*auth[[:space:]].*pam_(faillock|tally2?)\.so' /etc/pam.d/common-auth)
+  ev "[common-auth]"; ev "${lines:-  잠금 모듈 없음}"
+  ev "[common-account] $(grep -E '^[[:space:]]*account.*pam_faillock' /etc/pam.d/common-account || echo 없음)"
+  cf=$(get_kv /etc/security/faillock.conf deny); ev "[faillock.conf] deny=${cf:-미설정} unlock_time=$(get_kv /etc/security/faillock.conf unlock_time)"
+  [[ -n $lines ]] || { CHK_MSG="잠금 모듈 미적재"; return 1; }
+  grep -qE 'authfail|pam_tally' <<<"$lines" || { CHK_MSG="authfail 단계 없음"; return 1; }
+  deny=$(grep -oE 'deny=[0-9]+' <<<"$lines" | head -1 | cut -d= -f2); deny=${deny:-${cf:-3}}
+  CHK_MSG="deny=$deny"
+  (( deny >= 1 && deny <= 10 ))
+}
+fix_U03(){
+  if [[ -n $(pam_custom_stack) ]]; then FIX_MSG="pam_pribit 커스텀 스택 - 수동 적용 필요"; return 20; fi
+  [[ -n $(pam_mod_path pam_faillock.so) ]] || { FIX_MSG="pam_faillock.so 없음"; return 1; }
+  pam_backup_all
+  local C=/etc/security/faillock.conf
+  set_conf $C deny "$FAILLOCK_DENY" " = "; set_conf $C unlock_time "$FAILLOCK_UNLOCK" " = "
+  set_flag $C audit; set_flag $C silent
+  if [[ $FAILLOCK_EVEN_DENY_ROOT == yes ]]; then set_flag $C even_deny_root; set_conf $C root_unlock_time "$FAILLOCK_ROOT_UNLOCK" " = "; fi
+  local P1=/usr/share/pam-configs/n2sf-faillock P2=/usr/share/pam-configs/n2sf-faillock-notify
+  backup_file "$P1"; backup_file "$P2"
+  cat >"$P1" <<'EOF'
+Name: N2SF U-03 pam_faillock authfail (account lockout)
+Default: no
+Priority: 0
+Auth-Type: Primary
+Auth:
+	[default=die]			pam_faillock.so authfail
+EOF
+  cat >"$P2" <<'EOF'
+Name: N2SF U-03 pam_faillock preauth / account reset
+Default: no
+Priority: 1024
+Auth-Type: Primary
+Auth:
+	requisite			pam_faillock.so preauth
+Account-Type: Additional
+Account:
+	required			pam_faillock.so
+EOF
+  chmod 644 "$P1" "$P2"
+  pam_update n2sf-faillock n2sf-faillock-notify
+  if ! grep -qE 'pam_faillock\.so[[:space:]]+authfail' /etc/pam.d/common-auth; then
+    # pam-auth-update 거부(로컬 수정) 시: 표준 구조일 때만 안전 삽입
+    if grep -qE '^[[:space:]]*auth[[:space:]]+\[success=1 default=ignore\][[:space:]]+pam_unix\.so' /etc/pam.d/common-auth; then
+      awk '
+        /^[ \t]*auth[ \t]+\[success=1 default=ignore\][ \t]+pam_unix\.so/ && !d {
+          print "auth\trequisite\t\t\tpam_faillock.so preauth"; sub(/success=1/,"success=2"); print; print "auth\t[default=die]\t\t\tpam_faillock.so authfail"; d=1; next }
+        {print}' /etc/pam.d/common-auth >"$BK_DIR/.n2sf.ca" && cat "$BK_DIR/.n2sf.ca" >/etc/pam.d/common-auth; rm -f "$BK_DIR/.n2sf.ca"
+      grep -qE '^[[:space:]]*account.*pam_faillock' /etc/pam.d/common-account || echo -e "account\trequired\t\t\tpam_faillock.so" >>/etc/pam.d/common-account
+      warn "pam-auth-update 미적용 → common-auth 직접 수정(표준 구조 확인됨)"
+    else
+      rollback_item; FIX_MSG="common-auth 비표준 구조 - 수동 적용 필요"; return 20
+    fi
+  fi
+  pam_lint /etc/pam.d/common-auth /etc/pam.d/common-account || { rollback_item; FIX_MSG="PAM 오류 → 원복"; return 1; }
+  evcmd grep -vE '^\s*(#|$)' /etc/pam.d/common-auth /etc/pam.d/common-account
+  if ! gate "새 터미널에서 SSH 로그인 + 'sudo -i' 가 정상 동작하는지 확인하십시오. (잠금 해제: faillock --user <계정> --reset)"; then
+    rollback_item; FIX_MSG="안전 게이트 미승인 → 원복"; return 30
+  fi
+  FIX_MSG="pam_faillock deny=$FAILLOCK_DENY unlock_time=$FAILLOCK_UNLOCK"; return 0
+}
+
+# ============================ U-06 ==========================================
+chk_U06(){
+  local g pl
+  g=$(getent group "$SU_GROUP"); pl=$(grep -E '^[[:space:]]*auth[[:space:]]+required[[:space:]]+pam_wheel\.so' /etc/pam.d/su)
+  ev "[group] ${g:-$SU_GROUP 그룹 없음}"; ev "[/etc/pam.d/su] ${pl:-pam_wheel 미설정}"; ev "[su] $(fstat /usr/bin/su)"
+  CHK_MSG="group=$([[ -n $g ]] && echo Y || echo N) pam_wheel=$([[ -n $pl ]] && echo Y || echo N) perm=$(stat -c '%a %G' /usr/bin/su)"
+  [[ -n $g && -n $pl ]] || return 1
+  if [[ $SU_RESTRICT_PERM == yes ]]; then [[ $(stat -c '%G' /usr/bin/su) == "$SU_GROUP" ]] && perm_ok /usr/bin/su 4750 || return 1; fi
+  return 0
+}
+fix_U06(){
+  local members u
+  if ! getent group "$SU_GROUP" >/dev/null; then
+    groupadd "$SU_GROUP" && record_undo "groupdel $SU_GROUP" && ok "그룹 생성: $SU_GROUP"
+  fi
+  members=${SU_GROUP_MEMBERS:-$(sudo_users | tr '\n' ' ')}
+  for u in $members; do
+    id "$u" >/dev/null 2>&1 || continue
+    if ! id -nG "$u" | tr ' ' '\n' | grep -qx "$SU_GROUP"; then
+      gpasswd -a "$u" "$SU_GROUP" >/dev/null && record_undo "gpasswd -d $u $SU_GROUP" && ok "$SU_GROUP 그룹 등록: $u"
+    fi
+  done
+  [[ -z ${members// } ]] && warn "su 허용 사용자 미지정 - root 이외 su 불가(sudo 영향 없음)"
+  backup_file /etc/pam.d/su
+  if ! grep -qE '^[[:space:]]*auth[[:space:]]+required[[:space:]]+pam_wheel\.so' /etc/pam.d/su; then
+    if grep -qE '^#[[:space:]]*auth[[:space:]]+required[[:space:]]+pam_wheel\.so[[:space:]]*$' /etc/pam.d/su; then
+      sed -i -E "0,/^#[[:space:]]*auth[[:space:]]+required[[:space:]]+pam_wheel\.so[[:space:]]*$/s//auth       required   pam_wheel.so use_uid group=$SU_GROUP/" /etc/pam.d/su
+    else
+      awk -v l="auth       required   pam_wheel.so use_uid group=$SU_GROUP" '{print} /pam_rootok\.so/ && !d {print l; d=1}' /etc/pam.d/su >"$BK_DIR/.n2sf.su" && cat "$BK_DIR/.n2sf.su" >/etc/pam.d/su; rm -f "$BK_DIR/.n2sf.su"
+    fi
+  fi
+  ok "/etc/pam.d/su: $(grep -E '^[[:space:]]*auth[[:space:]]+required[[:space:]]+pam_wheel' /etc/pam.d/su)"
+  pam_lint /etc/pam.d/su || { rollback_item; FIX_MSG="PAM 오류 → 원복"; return 1; }
+  if [[ $SU_RESTRICT_PERM == yes ]]; then set_statovr /usr/bin/su root "$SU_GROUP" 4750; ok "su 권한: $(fstat /usr/bin/su)"; fi
+  # 자동 검증: 허용/비허용 사용자 실행권한
+  for u in $members; do id "$u" >/dev/null 2>&1 || continue
+    runuser -u "$u" -- test -x /usr/bin/su && ok "실행 허용 확인: $u" || warn "실행 불가: $u (재로그인 후 그룹 반영)"; break; done
+  runuser -u nobody -- test -x /usr/bin/su 2>/dev/null && warn "nobody 계정 su 실행 가능(권한 미적용)" || ok "비허용 사용자 실행 차단 확인(nobody)"
+  FIX_MSG="$SU_GROUP 그룹 + pam_wheel + su 4750"; return 0
+}
+
+# ============================ U-12 ==========================================
+tmout_val(){ grep -hE '^[[:space:]]*(export[[:space:]]+|readonly[[:space:]]+)?TMOUT=' /etc/profile /etc/profile.d/*.sh /etc/bash.bashrc 2>/dev/null | tail -1 | sed -E 's/.*TMOUT=["'\'']?([0-9]+).*/\1/'; }
+chk_U12(){
+  local v; v=$(tmout_val)
+  ev "[TMOUT] $(grep -nE 'TMOUT=' /etc/profile /etc/profile.d/*.sh /etc/bash.bashrc 2>/dev/null || echo 미설정)"
+  CHK_MSG="TMOUT=${v:-미설정}"
+  [[ -n $v ]] && (( v > 0 && v <= TMOUT_SEC ))
+}
+fix_U12(){
+  backup_file /etc/profile
+  if grep -qE '^[[:space:]]*(export[[:space:]]+)?TMOUT=' /etc/profile; then
+    sed -i -E "s/^([[:space:]]*(export[[:space:]]+)?TMOUT=).*/\1$TMOUT_SEC/" /etc/profile
+  else
+    printf '\n# [N2SF U-12] 세션 타임아웃\nTMOUT=%s\nexport TMOUT\n' "$TMOUT_SEC" >>/etc/profile
+  fi
+  local f; for f in /etc/profile.d/*.sh /etc/bash.bashrc; do
+    if grep -qE '^[[:space:]]*(export[[:space:]]+)?TMOUT=([0-9]+)' "$f" 2>/dev/null; then
+      local v; v=$(grep -hE 'TMOUT=' "$f" | tail -1 | sed -E 's/.*TMOUT=([0-9]+).*/\1/')
+      (( v > TMOUT_SEC || v == 0 )) && { backup_file "$f"; sed -i -E "s/^([[:space:]]*(export[[:space:]]+)?TMOUT=)[0-9]+/\1$TMOUT_SEC/" "$f"; }
+    fi
+  done
+  bash -n /etc/profile || { rollback_item; FIX_MSG="/etc/profile 구문 오류 → 원복"; return 1; }
+  FIX_MSG="TMOUT=$TMOUT_SEC (/etc/profile, 신규 로그인부터 적용)"; return 0
+}
+
+# ============================ U-18 ==========================================
+chk_U18(){
+  local f r=0; for f in /etc/shadow $([[ $GSHADOW_TOO == yes ]] && echo /etc/gshadow); do
+    ev "$(fstat $f)"; [[ $(stat -c %U $f) == root ]] && perm_ok $f 400 || r=1; done
+  CHK_MSG="$(stat -c '%a %U:%G' /etc/shadow)"; return $r
+}
+fix_U18(){
+  local f; for f in /etc/shadow /etc/shadow- $([[ $GSHADOW_TOO == yes ]] && echo /etc/gshadow /etc/gshadow-); do
+    [[ -f $f ]] || continue; record_mode "$f"; chown root "$f"; chmod 400 "$f"; ok "$(fstat $f)"; done
+  # 영향 확인: root 인증 경로 정상 여부
+  passwd -S root >/dev/null 2>&1 && ok "root 계정 shadow 접근 정상" || warn "passwd -S 실패"
+  FIX_MSG="/etc/shadow(gshadow) 400 root (unix_chkpwd 경유 비root 비밀번호 검증 불가 - 서버 운영 영향 없음)"; return 0
+}
+
+# ============================ U-20 ==========================================
+U20_SVC="timesyncd.conf:systemd-timesyncd resolved.conf:systemd-resolved networkd.conf:systemd-networkd oomd.conf:systemd-oomd user.conf: journal-upload.conf:systemd-journal-upload journal-remote.conf:systemd-journal-remote"
+u20_files(){ find /etc/systemd -maxdepth 1 -type f -name '*.conf' 2>/dev/null; for f in /etc/inetd.conf /etc/xinetd.conf; do [[ -f $f ]] && echo $f; done; }
+u20_svc_of(){ local b; b=$(basename "$1"); for p in $U20_SVC; do [[ ${p%%:*} == "$b" ]] && { echo "svc:${p#*:}"; return; }; done; }
+chk_U20(){
+  local f r=0 bad=""; while read -r f; do [[ -z $f ]] && continue; ev "$(fstat "$f")"
+    if [[ $(stat -c %U "$f") != root ]] || ! perm_ok "$f" 600; then
+      if [[ $U20_SVC_MODE == exception && -n $(u20_svc_of "$f") ]]; then ev "  └ 예외(비root 데몬 읽기 필요)"; continue; fi
+      r=1; bad+="$(basename "$f") "; fi
+  done < <(u20_files)
+  CHK_MSG="${bad:-이상 없음}"; return $r
+}
+fix_U20(){
+  local f b s svc act exc=""
+  while read -r f; do [[ -z $f ]] && continue
+    [[ $(stat -c %U "$f") == root ]] && perm_ok "$f" 600 && continue
+    s=$(u20_svc_of "$f"); b=$(basename "$f")
+    if [[ -n $s && $U20_SVC_MODE != chmod ]]; then
+      svc=${s#svc:}
+      if [[ $U20_SVC_MODE == exception ]]; then exc+="$b "; continue; fi
+      act=$(grep -vE '^[[:space:]]*([#;]|$)' "$f" | grep -vE '^[[:space:]]*\[.*\][[:space:]]*$')
+      if [[ -n $act ]]; then
+        local dd="/etc/systemd/${b}.d" nf
+        nf="$dd/00-n2sf-migrated.conf"
+        [[ -d $dd ]] || { record_undo "rmdir --ignore-fail-on-non-empty $dd"; mkdir -p "$dd"; chmod 755 "$dd"; }
+        backup_file "$nf"
+        { echo "# [N2SF U-20] $f 의 유효 설정 이관 ($(date '+%F %T'))"; grep -vE '^[[:space:]]*([#;]|$)' "$f"; } >"$nf"; chmod 644 "$nf"
+        ok "$b 유효설정 → $nf 이관"; ev "$(cat "$nf")"
+      fi
+      backup_file "$f"; rm -f "$f"; ok "$b 제거(비root 데몬 [$svc] 읽기 보장, 설정은 .conf.d 사용)"
+      if [[ -n $act && -n $svc ]] && svc_active "$svc" && [[ $svc != systemd-networkd ]]; then
+        systemctl restart "$svc" >>"$LOG_FILE" 2>&1 && ok "$svc 재기동" || warn "$svc 재기동 실패"
+      fi
+      have systemd-analyze && evcmd systemd-analyze cat-config "systemd/$b"
+    else
+      record_mode "$f"; chown root "$f"; chmod 600 "$f"; ok "$(fstat "$f")"
+      [[ -n $s ]] && warn "$b 는 ${s#svc:} 가 비root로 읽음 - 설정 반영 여부 확인 필요"
+    fi
+  done < <(u20_files)
+  if [[ -n $exc ]]; then FIX_MSG="root 데몬 설정 600 적용 / 예외: $exc"; return 21; fi
+  FIX_MSG="/etc/systemd/*.conf 600 root (모드:$U20_SVC_MODE)"; return 0
+}
+
+# ============================ U-21 ==========================================
+chk_U21(){
+  local f r=0; for f in /etc/rsyslog.conf /etc/syslog.conf; do [[ -f $f ]] || continue; ev "$(fstat $f)"
+    [[ $(stat -c %U $f) =~ ^(root|bin|sys)$ ]] && perm_ok $f 640 || r=1; done
+  CHK_MSG="$(stat -c '%a %U' /etc/rsyslog.conf 2>/dev/null)"; return $r
+}
+fix_U21(){
+  local f; for f in /etc/rsyslog.conf /etc/syslog.conf /etc/rsyslog.d/*.conf; do [[ -f $f ]] || continue
+    perm_ok "$f" 640 && [[ $(stat -c %U "$f") =~ ^(root|bin|sys)$ ]] && continue
+    record_mode "$f"; [[ $(stat -c %U "$f") =~ ^(root|bin|sys)$ ]] || chown root "$f"; chmod 640 "$f"; ok "$(fstat "$f")"; done
+  if have rsyslogd; then rsyslogd -N1 >>"$LOG_FILE" 2>&1 && ok "rsyslogd -N1 구문 검사 정상" || warn "rsyslogd -N1 경고(로그 확인)"; fi
+  FIX_MSG="rsyslog.conf(+rsyslog.d) 640 root"; return 0
+}
+
+# ============================ U-23 ==========================================
+chk_U23(){
+  local f r=0 bad=""; for f in $SUID_REMOVE_LIST; do [[ -f $f ]] || continue
+    if [[ -u $f || -g $f ]]; then r=1; bad+="$f "; ev "취약 $(fstat $f)"; fi; done
+  if [[ $CUR_PHASE == pre ]]; then
+    find / -xdev \( -perm -4000 -o -perm -2000 \) -type f 2>/dev/null | while read -r f; do
+      printf '%s  [%s]\n' "$(fstat "$f")" "$(dpkg -S "$f" 2>/dev/null | cut -d: -f1 | head -1 || true)"; done >"$EVID_DIR/U-23_suid_sgid_all.txt"
+    local np; np=$(grep -c '\[\]$' "$EVID_DIR/U-23_suid_sgid_all.txt" 2>/dev/null)
+    ev "전체 SUID/SGID 목록: U-23_suid_sgid_all.txt (패키지 미소속 ${np:-0}건 → 수동 검토)"
+  fi
+  CHK_MSG="${bad:-대상 SUID/SGID 없음}"; return $r
+}
+fix_U23(){
+  local f m nm; for f in $SUID_REMOVE_LIST; do [[ -f $f ]] || continue
+    [[ -u $f || -g $f ]] || continue
+    m=$(stat -c %a "$f"); nm=$(printf '%o' $(( 8#$m & 8#0777 )))
+    set_statovr "$f" "$(stat -c %U "$f")" "$(stat -c %G "$f")" "$nm"; ok "$(fstat "$f")"; done
+  FIX_MSG="SUID/SGID 제거(dpkg-statoverride 등록 → 패키지 업데이트 후에도 유지)"; return 0
+}
+
+# ============================ U-28 ==========================================
+chk_U28(){
+  local ha hd ipt nft ufw
+  ha=$(grep -vE '^[[:space:]]*(#|$)' /etc/hosts.allow 2>/dev/null); hd=$(grep -vE '^[[:space:]]*(#|$)' /etc/hosts.deny 2>/dev/null)
+  ipt=$(iptables -w -S INPUT 2>/dev/null | grep -c '^-A'); nft=$(nft list ruleset 2>/dev/null | grep -cE 'hook input')
+  ufw=$(ufw status 2>/dev/null | head -1)
+  ev "[hosts.allow] ${ha:-EMPTY}"; ev "[hosts.deny] ${hd:-EMPTY}"; ev "[iptables INPUT 규칙] ${ipt:-0}건 / [nft input hook] ${nft:-0} / [ufw] ${ufw:-n/a}"
+  ev "[libwrap] sshd:$(ldd "$(command -v sshd)" 2>/dev/null | grep -q libwrap && echo 지원 || echo 미지원) snmpd:$(ldd /usr/sbin/snmpd 2>/dev/null | grep -q libwrap && echo 지원 || echo 미지원)"
+  evcmd iptables -w -S N2SF_MGMT
+  local tw=0
+  [[ -n $hd && -n $ha ]] && grep -qE '^[[:space:]]*(sshd|ALL)[[:space:]]*:' <<<"$hd" && has_libwrap sshd && tw=1
+  ev "[유효성] tcpwrapper 실효=${tw} (hosts.deny 에 sshd/ALL 규칙 + sshd libwrap 지원 모두 필요)"
+  CHK_MSG="tcpwrapper=$([[ $tw == 1 ]] && echo Y || echo N) iptables=${ipt:-0}"
+  (( tw )) || (( ${ipt:-0} > 0 )) || [[ $ufw == *active* && $ufw != *inactive* ]]
+}
+tcpw_set(){ # daemon "list..."
+  local d=$1 list=$2
+  backup_file /etc/hosts.allow; backup_file /etc/hosts.deny
+  touch /etc/hosts.allow /etc/hosts.deny; chmod 644 /etc/hosts.allow /etc/hosts.deny
+  sed -i "/# N2SF-U-28 ${d}\$/d" /etc/hosts.allow /etc/hosts.deny
+  echo "${d}: ${list}    # N2SF-U-28 ${d}" >>/etc/hosts.allow
+  echo "${d}: ALL    # N2SF-U-28 ${d}" >>/etc/hosts.deny
+}
+fix_U28(){
+  if [[ -z ${MGMT_ALLOW_NETS// } ]]; then
+    FIX_MSG="MGMT_ALLOW_NETS(허용 관리 IP 대역) 미입력 → ACL 수집 후 설정 파일에 입력하여 재실행"; return 20
+  fi
+  local p n inside sshport nets_t=""
+  for n in $MGMT_ALLOW_NETS; do
+    [[ $n == *:* ]] && { FIX_MSG="MGMT_ALLOW_NETS 에 IPv6 대역($n) - 현재 스크립트는 IPv4 대역만 지원 → 수동 적용"; return 20; }
+  done
+  if [[ $FW_MODE == tcpwrapper ]] && ! has_libwrap sshd; then
+    FIX_MSG="sshd 가 libwrap(tcp wrapper) 미지원 → hosts.allow/deny 로는 차단되지 않음. FW_MODE=iptables 로 변경 후 재실행(PEP 는 자체 iptables 충돌 여부 확인)"; return 20
+  fi
+  sshport=$(sshd_eff port | head -1); sshport=${sshport:-22}
+  for p in $(ssh_peers); do
+    if [[ $p == *:* ]]; then
+      [[ $p == ::1 ]] && continue
+      FIX_MSG="IPv6($p)로 접속 중이라 허용대역을 검증할 수 없음 → IPv4 경로로 재접속 후 실행(차단 위험으로 중단)"; return 20
+    fi
+    [[ $p =~ ^[0-9.]+$ ]] || continue
+    inside=0; for n in $MGMT_ALLOW_NETS; do ip_in_cidr "$p" "$n" && inside=1; done
+    if (( ! inside )); then FIX_MSG="현재 SSH 접속 IP($p)가 허용대역 밖 → 차단 위험으로 중단"; return 20; fi
+    ok "현재 SSH 세션 $p 허용대역 포함 확인"
+  done
+  for n in $MGMT_ALLOW_NETS; do nets_t+="$(cidr_tcpw "$n") "; done
+  if [[ $FW_MODE == tcpwrapper || $FW_MODE == both ]]; then
+    tcpw_set sshd "127.0.0.1 [::1] ${nets_t}"
+    ok "hosts.allow/deny: sshd ← ${MGMT_ALLOW_NETS}"
+    if svc_active snmpd && [[ -n ${SNMP_NMS_HOSTS// } ]] && has_libwrap /usr/sbin/snmpd; then tcpw_set snmpd "127.0.0.1 [::1] ${SNMP_NMS_HOSTS}"; ok "hosts.allow/deny: snmpd ← $SNMP_NMS_HOSTS"; fi
+    ldd "$(command -v sshd)" 2>/dev/null | grep -q libwrap || warn "sshd 가 libwrap 미지원 → iptables 모드 병행 필요"
+  fi
+  if [[ $FW_MODE == iptables || $FW_MODE == both ]]; then
+    have iptables || { FIX_MSG="iptables 없음"; return 1; }
+    mkdir -p /etc/n2sf
+    local S=/etc/n2sf/n2sf-fw.sh U=/etc/systemd/system/n2sf-fw.service
+    backup_file "$S"; backup_file "$U"
+    cat >"$S" <<EOF
+#!/bin/sh
+# [N2SF U-28] 관리 서비스 접근통제 - generated $(date '+%F %T')
+IPT="iptables -w"
+if [ "\$1" = "stop" ]; then
+  \$IPT -D INPUT -p tcp --dport $sshport -j N2SF_MGMT 2>/dev/null
+  \$IPT -D INPUT -p udp --dport 161 -j N2SF_SNMP 2>/dev/null
+  \$IPT -F N2SF_MGMT 2>/dev/null; \$IPT -X N2SF_MGMT 2>/dev/null
+  \$IPT -F N2SF_SNMP 2>/dev/null; \$IPT -X N2SF_SNMP 2>/dev/null
+  exit 0
+fi
+\$IPT -N N2SF_MGMT 2>/dev/null || \$IPT -F N2SF_MGMT
+\$IPT -A N2SF_MGMT -s 127.0.0.0/8 -j RETURN
+for n in $MGMT_ALLOW_NETS; do \$IPT -A N2SF_MGMT -s "\$n" -j RETURN; done
+\$IPT -A N2SF_MGMT -j DROP
+\$IPT -C INPUT -p tcp --dport $sshport -j N2SF_MGMT 2>/dev/null || \$IPT -I INPUT 1 -p tcp --dport $sshport -j N2SF_MGMT
+NMS="$SNMP_NMS_HOSTS"
+if [ -n "\$NMS" ]; then
+  \$IPT -N N2SF_SNMP 2>/dev/null || \$IPT -F N2SF_SNMP
+  \$IPT -A N2SF_SNMP -s 127.0.0.0/8 -j RETURN
+  for n in \$NMS; do \$IPT -A N2SF_SNMP -s "\$n" -j RETURN; done
+  \$IPT -A N2SF_SNMP -j DROP
+  \$IPT -C INPUT -p udp --dport 161 -j N2SF_SNMP 2>/dev/null || \$IPT -I INPUT 1 -p udp --dport 161 -j N2SF_SNMP
+fi
+exit 0
+EOF
+    chmod 700 "$S"
+    cat >"$U" <<EOF
+[Unit]
+Description=N2SF U-28 management access control (iptables)
+After=network-pre.target
+Wants=network-pre.target
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=$S
+ExecStop=$S stop
+[Install]
+WantedBy=multi-user.target
+EOF
+    chmod 644 "$U"
+    has_systemd && { systemctl daemon-reload; systemctl enable n2sf-fw.service >>"$LOG_FILE" 2>&1; }
+    record_undo "$S stop; systemctl disable n2sf-fw.service; systemctl daemon-reload"
+    sh "$S" && ok "iptables N2SF_MGMT 체인 적용 (tcp/$sshport ← $MGMT_ALLOW_NETS)"
+    evcmd iptables -w -S N2SF_MGMT
+  fi
+  if ! gate "새 터미널에서 허용 대역 단말로 SSH 신규 접속이 되는지 확인하십시오." "$FW_GATE_TIMEOUT"; then
+    rollback_item; FIX_MSG="안전 게이트 미승인 → 원복"; return 30
+  fi
+  FIX_MSG="접근통제 적용($FW_MODE): ${MGMT_ALLOW_NETS}"; return 0
+}
+
+# ============================ U-37 ==========================================
+u37_files(){ { ls -1 /etc/crontab /etc/cron.allow /etc/cron.deny /etc/at.allow /etc/at.deny 2>/dev/null
+              find /etc/cron.d /var/spool/cron/crontabs /var/spool/cron/atjobs -maxdepth 1 -type f 2>/dev/null; } | sort -u; }
+chk_U37(){
+  local f r=0 bad=""
+  for f in /usr/bin/crontab /usr/bin/at; do [[ -f $f ]] || continue; ev "$(fstat $f)"; perm_ok $f 750 || { r=1; bad+="$(basename $f) "; }; done
+  while read -r f; do [[ -z $f ]] && continue; ev "$(fstat "$f")"
+    perm_ok "$f" 640 || { r=1; bad+="$(basename "$f") "; }
+    [[ $f == /var/spool/cron/* ]] || [[ $(stat -c %U "$f") == root ]] || { r=1; bad+="$(basename "$f")(owner) "; }
+  done < <(u37_files)
+  CHK_MSG="${bad:-이상 없음}"; return $r
+}
+fix_U37(){
+  local f
+  [[ -f /usr/bin/crontab ]] && { set_statovr /usr/bin/crontab root crontab 0750; ok "$(fstat /usr/bin/crontab)"; }
+  [[ -f /usr/bin/at ]] && { set_statovr /usr/bin/at root "$(stat -c %G /usr/bin/at)" 0750; ok "$(fstat /usr/bin/at)"; }
+  while read -r f; do [[ -z $f ]] && continue
+    perm_ok "$f" 640 && { [[ $f == /var/spool/cron/* ]] || [[ $(stat -c %U "$f") == root ]]; } && continue
+    record_mode "$f"; [[ $f == /var/spool/cron/* ]] || chown root "$f"; chmod 640 "$f"; ok "$(fstat "$f")"
+  done < <(u37_files)
+  svc_active cron && { systemctl reload cron >>"$LOG_FILE" 2>&1 || systemctl restart cron >>"$LOG_FILE" 2>&1; ok "cron 재적용"; }
+  FIX_MSG="crontab/at 750, cron 설정 640 root (일반 사용자 crontab 사용 제한)"; return 0
+}
+
+# ============================ SNMP (U-58~61) ================================
+SNMPD_CONF=/etc/snmp/snmpd.conf; SNMP_VAR=/var/lib/snmp/snmpd.conf; SNMP_DONE=0
+snmp_local_get(){ # 암호를 ps 에 노출하지 않도록 임시 snmp.conf(600) 사용
+  local d rc; d=$(mktemp -d "$BK_DIR/.snmpc.XXXXXX") || return 1
+  ( umask 077
+    { echo "defVersion 3"; echo "defSecurityLevel authPriv"; echo "defSecurityName $SNMPV3_USER"
+      echo "defAuthType $SNMPV3_AUTH_PROTO"; echo "defAuthPassphrase $SNMPV3_AUTH_PASS"
+      echo "defPrivType $SNMPV3_PRIV_PROTO"; echo "defPrivPassphrase $SNMPV3_PRIV_PASS"; } >"$d/snmp.conf" )
+  SNMPCONFPATH="$d" snmpget -t 3 -r 1 127.0.0.1 1.3.6.1.2.1.1.1.0; rc=$?
+  rm -rf "$d"; return $rc
+}
+snmp_running(){ svc_active snmpd || pgrep -x snmpd >/dev/null 2>&1; }
+snmp_conf_lines(){ cat "$SNMPD_CONF" /etc/snmp/snmpd.conf.d/*.conf 2>/dev/null | grep -vE '^[[:space:]]*(#|$)'; }
+snmp_comm_lines(){ snmp_conf_lines | grep -E '^[[:space:]]*(ro|rw)community6?[[:space:]]|^[[:space:]]*com2sec6?[[:space:]]'; }
+snmp_comm_ok(){ # complexity
+  local s=$1; [[ ${s,,} == public || ${s,,} == private ]] && return 1
+  if [[ $s =~ [A-Za-z] && $s =~ [0-9] && $s =~ [^A-Za-z0-9] ]]; then (( ${#s} >= 8 )); return; fi
+  [[ $s =~ [A-Za-z] && $s =~ [0-9] ]] && (( ${#s} >= 10 ))
+}
+snmp_decide(){
+  [[ -n $SNMP_MODE ]] && return 0
+  snmp_running || return 0
+  if (( ASSUME_YES )) || [[ ! -t 0 ]]; then return 0; fi
+  echo; info "SNMP(snmpd) 가 구동 중입니다. 운영 정책을 선택하십시오."
+  echo "      1) disable : SNMP 미사용 → 서비스 중지/비활성화"
+  echo "      2) v3      : SNMPv3(authPriv) 전용, v1/v2c community 제거"
+  echo "      3) v3v2c   : SNMPv3 + 복잡한 v2c community(NMS IP 제한)"
+  echo "      4) skip    : 수동 처리"
+  local a; read -r -p "  ? 선택 [1-4]: " a
+  case $a in 1) SNMP_MODE=disable;; 2) SNMP_MODE=v3;; 3) SNMP_MODE=v3v2c;; *) SNMP_MODE=skip;; esac
+  if [[ $SNMP_MODE == v3* ]]; then
+    if ! snmp_conf_lines | grep -qE '^[[:space:]]*r[ow]user[[:space:]]' || [[ -z $SNMPV3_USER ]]; then
+      read -r -p "  ? SNMPv3 사용자명 (Enter=기존 rouser 유지): " SNMPV3_USER
+      if [[ -n $SNMPV3_USER ]]; then read -r -s -p "  ? Auth 암호(8자 이상): " SNMPV3_AUTH_PASS; echo; read -r -s -p "  ? Priv 암호(8자 이상): " SNMPV3_PRIV_PASS; echo; fi
+    fi
+    [[ -z $SNMP_NMS_HOSTS ]] && read -r -p "  ? 허용 NMS IP(공백 구분): " SNMP_NMS_HOSTS
+    [[ $SNMP_MODE == v3v2c && -z $SNMP_V2C_COMMUNITY ]] && { read -r -s -p "  ? v2c Community String: " SNMP_V2C_COMMUNITY; echo; }
+  fi
+}
+snmp_apply(){
+  (( SNMP_DONE )) && return "$SNMP_RC"
+  SNMP_DONE=1; SNMP_RC=0
+  case $SNMP_MODE in
+    disable)
+      record_svc snmpd.service
+      systemctl disable --now snmpd.service >>"$LOG_FILE" 2>&1 || { pkill -x snmpd; }
+      sleep 1; snmp_running && { err "snmpd 중지 실패"; SNMP_RC=1; } || ok "snmpd 중지 및 비활성화"
+      ;;
+    v3|v3v2c)
+      [[ -f $SNMPD_CONF ]] || { err "$SNMPD_CONF 없음"; SNMP_RC=1; return 1; }
+      if [[ $SNMP_MODE == v3v2c ]] && ! snmp_comm_ok "$SNMP_V2C_COMMUNITY"; then err "SNMP_V2C_COMMUNITY 복잡도 미충족"; SNMP_RC=20; return 20; fi
+      if [[ -n $SNMPV3_USER ]] && (( ${#SNMPV3_AUTH_PASS} < 8 || ${#SNMPV3_PRIV_PASS} < 8 )); then err "SNMPv3 암호는 8자 이상"; SNMP_RC=20; return 20; fi
+      record_svc snmpd.service; backup_file "$SNMPD_CONF"; backup_file "$SNMP_VAR"
+      local f; for f in /etc/snmp/snmpd.conf.d/*.conf; do [[ -f $f ]] && grep -qE '^[[:space:]]*((ro|rw)community6?|com2sec6?)[[:space:]]' "$f" && backup_file "$f"; done
+      systemctl stop snmpd.service >>"$LOG_FILE" 2>&1
+      # v1/v2c community 제거
+      for f in "$SNMPD_CONF" /etc/snmp/snmpd.conf.d/*.conf; do [[ -f $f ]] || continue
+        sed -i -E 's/^([[:space:]]*((ro|rw)community6?|com2sec6?)[[:space:]].*)$/# [N2SF U-60] \1/' "$f"; done
+      grep -qE '^[[:space:]]*view[[:space:]]+systemonly' "$SNMPD_CONF" || printf 'view   systemonly  included   .1.3.6.1.2.1.1\nview   systemonly  included   .1.3.6.1.2.1.25.1\n' >>"$SNMPD_CONF"
+      if [[ $SNMP_MODE == v3v2c ]]; then
+        local h; for h in ${SNMP_NMS_HOSTS:-127.0.0.1}; do echo "rocommunity ${SNMP_V2C_COMMUNITY} ${h} -V systemonly    # N2SF U-60/61" >>"$SNMPD_CONF"; done
+      fi
+      if [[ -n $SNMPV3_USER ]]; then
+        grep -qE "^[[:space:]]*rouser[[:space:]]+${SNMPV3_USER}[[:space:]]" "$SNMPD_CONF" || echo "rouser ${SNMPV3_USER} authpriv -V systemonly    # N2SF U-59" >>"$SNMPD_CONF"
+        mkdir -p /var/lib/snmp
+        local uhex; uhex=$(printf %s "$SNMPV3_USER" | od -An -tx1 | tr -d ' \n')
+        grep -qiE "^createUser[[:space:]]+${SNMPV3_USER}[[:space:]]|^usmUser[[:space:]].*0x${uhex}([[:space:]]|\$)" "$SNMP_VAR" 2>/dev/null || echo "createUser ${SNMPV3_USER} ${SNMPV3_AUTH_PROTO} \"${SNMPV3_AUTH_PASS}\" ${SNMPV3_PRIV_PROTO} \"${SNMPV3_PRIV_PASS}\"" >>"$SNMP_VAR"
+        chmod 600 "$SNMP_VAR"; chown Debian-snmp:Debian-snmp "$SNMP_VAR" 2>/dev/null
+      elif ! grep -qE '^[[:space:]]*r[ow]user[[:space:]]' "$SNMPD_CONF"; then
+        warn "SNMPv3 사용자 미지정 및 기존 rouser 없음"; SNMP_RC=21
+      fi
+      if [[ -n $SNMP_AGENT_ADDRESS ]]; then
+        sed -i -E 's/^([[:space:]]*agentaddress[[:space:]].*)$/# [N2SF U-61] \1/I' "$SNMPD_CONF"; echo "agentAddress ${SNMP_AGENT_ADDRESS}    # N2SF U-61" >>"$SNMPD_CONF"
+      fi
+      if [[ -n ${SNMP_NMS_HOSTS// } ]]; then
+        if has_libwrap /usr/sbin/snmpd; then tcpw_set snmpd "127.0.0.1 [::1] ${SNMP_NMS_HOSTS}"; ok "snmpd 접근제어(hosts.allow): $SNMP_NMS_HOSTS"
+        elif iptables -w -S N2SF_SNMP >/dev/null 2>&1; then ok "snmpd 접근제어(iptables N2SF_SNMP) 사용"
+        else warn "snmpd 가 libwrap 미지원 → hosts.allow 는 무효. FW_MODE=iptables 로 U-28 적용 필요"; SNMP_RC=21; fi
+      else warn "SNMP_NMS_HOSTS 미지정 → IP 접근제어 미적용"; SNMP_RC=21; fi
+      systemctl start snmpd.service >>"$LOG_FILE" 2>&1; sleep 2
+      if snmp_running; then ok "snmpd 재기동 정상"
+        if [[ -n $SNMPV3_USER ]] && have snmpget; then
+          snmp_local_get >>"$LOG_FILE" 2>&1 \
+            && ok "SNMPv3 authPriv 로컬 조회 성공" || warn "SNMPv3 로컬 조회 실패(agentAddress/hosts.allow 확인)"
+        fi
+      else err "snmpd 기동 실패 → 원복"; rollback_item; SNMP_RC=1; fi
+      ;;
+    *) SNMP_RC=20 ;;
+  esac
+  return "$SNMP_RC"
+}
+chk_U58(){
+  local st="inactive"; snmp_running && st="active"
+  ev "[snmpd] $st / enabled=$(systemctl is-enabled snmpd 2>/dev/null)"; ev "[listen] $(ss -lunH 2>/dev/null | awk '$4 ~ /:161$/{print $4}' | tr '\n' ' ')"
+  CHK_MSG="snmpd=$st mode=${SNMP_MODE:-미정}"
+  [[ $st == inactive ]] || [[ $SNMP_MODE == v3 || $SNMP_MODE == v3v2c ]]
+}
+fix_U58(){
+  snmp_decide
+  case $SNMP_MODE in
+    disable) snmp_apply; return ;;
+    v3|v3v2c) FIX_MSG="운영상 SNMP 필요 판정 - U-59~61 에서 보안설정"; return 0 ;;
+    *) FIX_MSG="SNMP 사용 여부 미결정(SNMP_MODE) - 담당자 확인 필요"; return 20 ;;
+  esac
+}
+chk_U59(){
+  snmp_running || { CHK_MSG="snmpd 미구동"; ev "snmpd inactive"; return 0; }
+  local u; u=$(snmp_conf_lines | grep -E '^[[:space:]]*r[ow]user[[:space:]]'); ev "[v3 user] ${u:-없음}"
+  ev "[usmUser] $(grep -cE '^(usmUser|createUser)' $SNMP_VAR 2>/dev/null)건 (/var/lib/snmp/snmpd.conf)"
+  CHK_MSG="v3 user=$([[ -n $u ]] && echo Y || echo N)"
+  [[ -n $u ]] || return 1
+  [[ $SNMP_MODE == v3 ]] && [[ -n $(snmp_comm_lines) ]] && return 1
+  return 0
+}
+fix_U59(){ [[ $SNMP_MODE == v3* || $SNMP_MODE == disable ]] || { snmp_decide; }; snmp_apply; local r=$?; FIX_MSG="SNMP_MODE=$SNMP_MODE"; return $r; }
+chk_U60(){
+  snmp_running || { CHK_MSG="snmpd 미구동"; return 0; }
+  local l s r=0 out=""; while read -r l; do [[ -z $l ]] && continue; s=$(awk '{ if($1 ~ /^com2sec/) print $4; else print $2 }' <<<"$l")
+    ev "$l"; snmp_comm_ok "$s" || { r=1; out+="${s} "; }; done < <(snmp_comm_lines)
+  [[ -z $(snmp_comm_lines) ]] && ev "community 미사용(SNMPv3 전용)"
+  CHK_MSG="${out:+취약 community: $out}"; CHK_MSG=${CHK_MSG:-"community 이상 없음"}; return $r
+}
+fix_U60(){ fix_U59; }
+chk_U61(){
+  snmp_running || { CHK_MSG="snmpd 미구동"; return 0; }
+  local l r=0 src tw aa
+  tw=$(grep -E '^[[:space:]]*snmpd[[:space:]]*:' /etc/hosts.allow 2>/dev/null); ev "[hosts.allow snmpd] ${tw:-없음}"
+  aa=$(snmp_conf_lines | grep -iE '^[[:space:]]*agentaddress'); ev "[agentAddress] ${aa:-기본(전체 인터페이스)}"
+  ev "[iptables N2SF_SNMP] $(iptables -w -S N2SF_SNMP 2>/dev/null | grep -c '^-A')건"
+  if [[ -n $(snmp_comm_lines) ]]; then
+    while read -r l; do [[ -z $l ]] && continue; src=$(awk '{print $3}' <<<"$l"); ev "$l"
+      [[ -z $src || $src == default || $src == -V || $src == 0.0.0.0/0 || $src == ::/0 ]] && r=1; done < <(snmp_comm_lines)
+  else
+    r=1
+    [[ -n $tw ]] && has_libwrap /usr/sbin/snmpd && r=0
+    iptables -w -S N2SF_SNMP >/dev/null 2>&1 && r=0
+    [[ -n $aa ]] && ! grep -qiE 'udp:161|0\.0\.0\.0|udp6?:\[::\]' <<<"$aa" && grep -qiE '127\.0\.0\.1|localhost' <<<"$aa" && r=0
+  fi
+  CHK_MSG="IP 접근제어=$([[ $r == 0 ]] && echo Y || echo N)"; return $r
+}
+fix_U61(){ fix_U59; }
+
+# ============================ U-62 ==========================================
+banner_text(){
+  if [[ -n $BANNER_FILE && -f $BANNER_FILE ]]; then cat "$BANNER_FILE"; return; fi
+  cat <<'EOF'
+******************************************************************************
+*                          [ 경 고  /  WARNING ]                             *
+*                                                                            *
+*  본 시스템은 허가된 사용자만 이용할 수 있습니다.                           *
+*  비인가 접근 및 사용은 관련 법령에 따라 처벌받을 수 있으며,                *
+*  모든 접속 및 작업 내역은 기록·감시됩니다.                                 *
+*                                                                            *
+*  This system is for authorized users only. All activities are monitored    *
+*  and logged. Unauthorized access is prohibited and will be prosecuted.     *
+******************************************************************************
+EOF
+}
+VER_RE='(Ubuntu|Debian|GNU/Linux|[0-9]+\.[0-9]+(\.[0-9]+)? LTS|\\[rvsmn]|Kernel)'
+U62_MOTD="${U62_MOTD:-00-header 10-help-text 50-landscape-sysinfo 50-motd-news 88-esm-announce 90-updates-available 91-release-upgrade 91-contract-ua-esm-status 95-hwe-eol 60-unminimize}"
+chk_U62(){
+  local r=0 f b x
+  for f in /etc/issue /etc/issue.net /etc/motd; do
+    if [[ -s $f ]]; then ev "[$f] $(head -c 300 "$f" | tr '\n' ' ')"; grep -qE "$VER_RE" "$f" && { r=1; ev "  └ 버전정보 노출"; }
+    else ev "[$f] 없음/빈 파일"; r=1; fi; done
+  if have sshd; then b=$(sshd_eff Banner); ev "[sshd Banner] ${b:-none}"
+    if [[ -z $b || $b == none || ! -s $b ]]; then r=1; else grep -qE "$VER_RE" "$b" && r=1; fi
+    grep -qiE '^[[:space:]]*Banner[[:space:]]' /etc/ssh/sshd_config || r=1; fi
+  for x in $U62_MOTD; do [[ -x /etc/update-motd.d/$x ]] && { ev "[update-motd] $x 실행 가능(버전 노출)"; r=1; }; done
+  ev "[update-motd.d 실행 가능 스크립트] $(find /etc/update-motd.d -maxdepth 1 -type f -perm -u+x -printf '%f ' 2>/dev/null)  ← 버전/시스템 정보를 출력하는 항목이 남아 있으면 conf 의 U62_MOTD 에 추가"
+  CHK_MSG="banner=${b:-none}"; return $r
+}
+fix_U62(){
+  local f x
+  for f in /etc/issue /etc/issue.net /etc/motd; do backup_file "$f"; banner_text >"$f"; chmod 644 "$f"; chown root:root "$f"; done
+  ok "/etc/issue, /etc/issue.net, /etc/motd 경고문 적용"
+  for x in $U62_MOTD; do [[ -x /etc/update-motd.d/$x ]] && { record_mode "/etc/update-motd.d/$x"; chmod a-x "/etc/update-motd.d/$x"; }; done
+  [[ -f /etc/default/motd-news ]] && set_conf /etc/default/motd-news ENABLED 0 "="
+  ok "동적 MOTD(버전/패키지 정보) 비활성화"
+  if have sshd; then
+    local cur; cur=$(sshd_eff Banner)
+    [[ -n $cur && $cur != none && $cur != "$SSH_BANNER_PATH" ]] && warn "기존 SSH Banner($cur) → $SSH_BANNER_PATH 로 변경 (원본 파일은 유지)"
+    sshd_set Banner "$SSH_BANNER_PATH"
+    ssh_reload || { rollback_item; FIX_MSG="sshd 구문오류 → 원복"; return 1; }
+  fi
+  FIX_MSG="경고 배너 적용(기관 지정 문구는 BANNER_FILE 로 교체)"; return 0
+}
+
+# ============================ U-64 ==========================================
+chk_U64(){
+  local up sec
+  ev "$(grep -E '^(PRETTY_NAME|VERSION)=' /etc/os-release)"; ev "kernel: $(uname -r)"
+  ev "unattended-upgrades: $(dpkg -l unattended-upgrades 2>/dev/null | awk '/^ii/{print $3}') / APT::Periodic: $(grep -h 'Unattended-Upgrade' /etc/apt/apt.conf.d/20auto-upgrades 2>/dev/null | tr '\n' ' ')"
+  ev "최근 apt 작업: $(grep -h 'Start-Date' /var/log/apt/history.log 2>/dev/null | tail -1)"
+  up=$(apt-get -s -o Debug::NoLocking=1 upgrade 2>/dev/null | grep -c '^Inst '); sec=$(apt-get -s -o Debug::NoLocking=1 upgrade 2>/dev/null | grep '^Inst ' | grep -ci security)
+  ev "업데이트 대기: 전체 ${up}건 / 보안 ${sec}건 (로컬 패키지 목록 기준)"
+  apt-get -s upgrade 2>/dev/null | grep '^Inst ' | grep -i security | head -50 >>"$EVID_DIR/U-64.txt"
+  CHK_MSG="대기 업데이트 ${up}건(보안 ${sec})"
+  [[ $CUR_PHASE == post && $PATCH_MODE != report ]] && (( sec == 0 )) && return 0
+  return 1
+}
+fix_U64(){
+  case $PATCH_MODE in
+    report) FIX_MSG="패치 정책 기관 협의 필요(인터뷰 항목) - 증적 수집 완료"; return 20 ;;
+    security|full)
+      info "apt-get update (최대 300s)"; timeout 300 apt-get update -q >>"$LOG_FILE" 2>&1 || { FIX_MSG="저장소 접근 불가(폐쇄망) - 오프라인 패치 필요"; return 20; }
+      if [[ $PATCH_MODE == security ]] && have unattended-upgrade; then timeout 3600 unattended-upgrade -v >>"$LOG_FILE" 2>&1
+      else DEBIAN_FRONTEND=noninteractive timeout 3600 apt-get -y -q -o Dpkg::Options::=--force-confold upgrade >>"$LOG_FILE" 2>&1; fi
+      [[ -f /var/run/reboot-required ]] && warn "재부팅 필요: $(cat /var/run/reboot-required.pkgs 2>/dev/null | tr '\n' ' ')"
+      warn "패키지 갱신으로 권한이 초기화될 수 있으므로 스크립트 --check 재실행 권장"
+      FIX_MSG="패치 적용($PATCH_MODE)"; return 0 ;;
+  esac
+}
+
+# ============================ U-65 ==========================================
+ntp_target(){
+  [[ -n $NTP_SERVERS ]] && { echo "$NTP_SERVERS"; return; }
+  local ip p; ip=$(hostname -I 2>/dev/null)
+  for p in $NTP_MAP; do for a in $ip; do [[ $a == ${p%%:*}* ]] && { echo "${p#*:}"; return; }; done; done
+}
+chk_U65(){
+  local sy srv
+  if svc_active chrony || svc_active chronyd; then ev "chrony 사용"; evcmd chronyc tracking; chronyc tracking 2>/dev/null | grep -q 'Leap status *: Normal'; return; fi
+  sy=$(timedatectl show -p NTPSynchronized --value 2>/dev/null); srv=$(timedatectl show-timesync -p ServerName --value 2>/dev/null)
+  evcmd timedatectl; evcmd timedatectl show-timesync
+  have systemd-analyze && evcmd systemd-analyze cat-config systemd/timesyncd.conf
+  CHK_MSG="synchronized=${sy:-?} server=${srv:-?}"
+  [[ $sy == yes ]] && [[ -n $srv && $srv != *ntp.ubuntu.com* ]]
+}
+fix_U65(){
+  if svc_active chrony || svc_active chronyd; then FIX_MSG="chrony 사용 중 - chrony.conf 수동 점검"; return 20; fi
+  local t; t=$(ntp_target)
+  [[ -z $t ]] && { FIX_MSG="NTP 서버 미지정(NTP_SERVERS)"; return 20; }
+  local D=/etc/systemd/timesyncd.conf.d F=/etc/systemd/timesyncd.conf.d/60-n2sf-ntp.conf
+  [[ -d $D ]] || { record_undo "rmdir --ignore-fail-on-non-empty $D"; mkdir -p $D; chmod 755 $D; }
+  backup_file "$F"
+  cat >"$F" <<EOF
+# [N2SF U-65] NTP 시각 동기화 설정 ($(date '+%F %T'))
+[Time]
+NTP=$t
+FallbackNTP=$NTP_FALLBACK
+PollIntervalMinSec=$NTP_POLL_MIN
+PollIntervalMaxSec=$NTP_POLL_MAX
+EOF
+  chmod 644 "$F"; ok "NTP=$t (Poll ${NTP_POLL_MIN}~${NTP_POLL_MAX}s)"
+  record_svc systemd-timesyncd.service
+  timedatectl set-ntp true >>"$LOG_FILE" 2>&1
+  systemctl restart systemd-timesyncd.service >>"$LOG_FILE" 2>&1 || { FIX_MSG="timesyncd 재기동 실패"; return 1; }
+  info "시각 동기화 대기(최대 ${NTP_SYNC_WAIT}s, UDP/123 필요)"
+  local i; for ((i=0; i<NTP_SYNC_WAIT; i+=5)); do
+    [[ $(timedatectl show -p NTPSynchronized --value 2>/dev/null) == yes ]] && { ok "동기화 완료(${i}s): $(timedatectl show-timesync -p ServerAddress --value)"; break; }
+    sleep 5; done
+  [[ $(timedatectl show -p NTPSynchronized --value 2>/dev/null) == yes ]] || warn "동기화 미완료 - NTP 서버($t) UDP/123 통신 확인 필요"
+  FIX_MSG="timesyncd NTP=$t"; return 0
+}
+
+# ============================ U-66 ==========================================
+u66_rotate_apply(){ # FILE WEEKS : 스탠자별 주기(daily/weekly/monthly)에 맞춰 보관 개수를 '늘리기만' 함
+  local f=$1 w=$2
+  awk -v W="$w" '
+    !inb { print; if ($0 ~ /\{[ \t]*$/) { inb=1; n=0; freq="weekly" } ; next }
+    { buf[++n]=$0
+      if ($0 ~ /^[ \t]*(daily|weekly|monthly|yearly)[ \t]*$/) { freq=$1 }
+      if ($0 ~ /^[ \t]*\}/) {
+        for (i=1;i<=n;i++) { l=buf[i]
+          if (l ~ /^[ \t]*rotate[ \t]+[0-9]+/) {
+            cur=l; sub(/^[ \t]*rotate[ \t]+/,"",cur); cur+=0
+            need = (freq=="daily") ? W*7 : (freq=="monthly") ? int((W*7+29)/30) : (freq=="yearly") ? 1 : W
+            if (need>cur) sub(/[0-9]+/, need, l)
+          }
+          print l }
+        inb=0 } }' "$f" >"$f.n2sf.tmp" && cat "$f.n2sf.tmp" >"$f"; rm -f "$f.n2sf.tmp"
+}
+u66_min_weeks(){ # FILE → 스탠자별 보관기간(주 환산)의 최소값
+  awk '
+    !inb { if ($0 ~ /\{[ \t]*$/) { inb=1; fr="weekly"; r=-1 } ; next }
+    { if ($0 ~ /^[ \t]*(daily|weekly|monthly|yearly)[ \t]*$/) fr=$1
+      if ($0 ~ /^[ \t]*rotate[ \t]+[0-9]+/) r=$2+0
+      if ($0 ~ /^[ \t]*\}/) { inb=0; if (r>=0) { w=(fr=="daily")? r/7 : (fr=="monthly")? r*4.3 : (fr=="yearly")? r*52 : r; if (min==""||w<min) min=w } } }
+    END { if (min=="") print 0; else printf "%d\n", min }' "$1" 2>/dev/null
+}
+U66_FILE=/etc/rsyslog.d/40-n2sf-policy.conf
+chk_U66(){
+  local all r=0
+  all=$(cat /etc/rsyslog.conf /etc/rsyslog.d/*.conf 2>/dev/null | grep -vE '^[[:space:]]*(#|$)')
+  ev "[rsyslog] $(svc_active rsyslog && echo active || (pgrep -x rsyslogd >/dev/null && echo running || echo inactive))"
+  grep -E '^[^$].*[[:space:]]+[-/:@]' <<<"$all" | grep -vE '^(module|input|global|template|\$)' >>"$EVID_DIR/U-66.txt"
+  grep -qE '(^|[;,])auth(,authpriv)?\.\*|authpriv\.\*' <<<"$all" || { r=1; ev "  └ auth/authpriv 규칙 없음"; }
+  grep -qE '(^|;)cron\.\*' <<<"$all" || { r=1; ev "  └ cron 규칙 없음"; }
+  grep -qE '\*\.emerg' <<<"$all" || { r=1; ev "  └ *.emerg 규칙 없음"; }
+  [[ -f $U66_FILE ]] || r=1
+  [[ -n $LOG_ROTATE_COUNT && -f /etc/logrotate.d/rsyslog ]] && { local rc; rc=$(u66_min_weeks /etc/logrotate.d/rsyslog); ev "[logrotate rsyslog] 스탠자 최소 보관=${rc:-0}주 (목표 ${LOG_ROTATE_COUNT}주, daily/weekly 환산)"; (( ${rc:-0} >= LOG_ROTATE_COUNT )) || r=1; }
+  [[ -n $SYSLOG_REMOTE ]] && { grep -qF "$SYSLOG_REMOTE" <<<"$all" || r=1; }
+  CHK_MSG="정책 파일=$([[ -f $U66_FILE ]] && echo Y || echo N)"; return $r
+}
+fix_U66(){
+  have rsyslogd || { FIX_MSG="rsyslog 미설치"; return 1; }
+  local all; all=$(cat /etc/rsyslog.conf /etc/rsyslog.d/*.conf 2>/dev/null | grep -vE '^[[:space:]]*(#|$)')
+  backup_file "$U66_FILE"
+  {
+    echo "# [N2SF U-66] 시스템 로깅 정책 ($(date '+%F %T'))"
+    grep -qE '(^|[;,])auth(,authpriv)?\.\*|authpriv\.\*' <<<"$all" || echo "auth,authpriv.*                         /var/log/auth.log"
+    grep -qE '(^|;)cron\.\*' <<<"$all" || echo "cron.*                                  /var/log/cron.log"
+    grep -qE '\*\.emerg' <<<"$all" || echo "*.emerg                                 :omusrmsg:*"
+    [[ $LOG_ENABLE_MESSAGES == yes ]] && echo "*.info;mail.none;authpriv.none;cron.none  -/var/log/messages"
+    echo "*.alert                                 /var/log/alert.log"
+    [[ -n $SYSLOG_REMOTE ]] && echo "*.info;mail.none                        $SYSLOG_REMOTE"
+  } >"$U66_FILE"; chmod 640 "$U66_FILE"
+  if [[ -n $LOG_ROTATE_COUNT && -f /etc/logrotate.d/rsyslog ]]; then
+    backup_file /etc/logrotate.d/rsyslog
+    u66_rotate_apply /etc/logrotate.d/rsyslog "$LOG_ROTATE_COUNT"
+    local AL=/etc/logrotate.d/n2sf-alert RR='[ -x /usr/lib/rsyslog/rsyslog-rotate ] && /usr/lib/rsyslog/rsyslog-rotate || systemctl kill -s HUP rsyslog.service >/dev/null 2>&1 || true'
+    backup_file "$AL"
+    printf '%s\n' '/var/log/alert.log {' '    weekly' "    rotate $LOG_ROTATE_COUNT" '    missingok' '    notifempty' '    compress' '    delaycompress' '    postrotate' "        $RR" '    endscript' '}' >"$AL"; chmod 644 "$AL"
+    logrotate -d /etc/logrotate.d/rsyslog >>"$LOG_FILE" 2>&1 && ok "logrotate 보관주기 rotate=$LOG_ROTATE_COUNT(weekly)" || warn "logrotate 구문 확인 필요"
+  fi
+  rsyslogd -N1 >>"$LOG_FILE" 2>&1 || { rollback_item; FIX_MSG="rsyslog 구문 오류 → 원복"; return 1; }
+  systemctl restart rsyslog >>"$LOG_FILE" 2>&1; sleep 2
+  local tag="N2SF-U66-TEST-$$-$RANDOM"; logger -p cron.info "$tag"; logger -p authpriv.info "$tag"; sleep 2
+  grep -qs "$tag" /var/log/cron.log && ok "cron.log 기록 확인" || warn "cron.log 기록 미확인"
+  grep -qs "$tag" /var/log/auth.log && ok "auth.log 기록 확인" || warn "auth.log 기록 미확인"
+  evcmd cat "$U66_FILE"
+  FIX_MSG="로깅 정책 파일 적용(기관 로그정책 확정 시 보완)"; return 0
+}
+
+# ============================ U-67 ==========================================
+u67_targets(){ # 최상위 /var/log 파일 중 syslog 소유 또는 root 소유 o-권한 존재 (제외: 하위 디렉터리, utmp 계열, 예외 regex)
+  find /var/log -maxdepth 1 -type f 2>/dev/null | while read -r f; do
+    [[ $(basename "$f") =~ $LOG_EXCLUDE_REGEX ]] && continue
+    [[ $(stat -c %G "$f") == utmp ]] && continue
+    case $(basename "$f") in wtmp*|btmp*|lastlog|faillog) continue;; esac
+    local o; o=$(stat -c %U "$f")
+    if [[ $o == syslog ]] || { [[ $o == root ]] && ! perm_ok "$f" 640; }; then echo "$f"; fi
+  done
+}
+chk_U67(){
+  local n other
+  n=$(u67_targets | wc -l)
+  u67_targets | head -40 | while read -r f; do ev "취약 $(fstat "$f")"; done
+  other=$(find /var/log -maxdepth 1 -type f ! -user root ! -user syslog 2>/dev/null | head -20)
+  [[ -n $other ]] && ev "[예외-타 서비스 소유] $(tr '\n' ' ' <<<"$other")"
+  ev "[예외-하위 디렉터리(mysql/redis 등) 미변경] $(find /var/log -mindepth 1 -maxdepth 1 -type d ! -user root -printf '%u:%p ' 2>/dev/null)"
+  ev "[rsyslog 구동계정] $(ps -o user= -C rsyslogd 2>/dev/null | head -1) / FileOwner=$(awk '$1=="$FileOwner"{print $2}' /etc/rsyslog.conf)"
+  CHK_MSG="대상 ${n}건"
+  (( n == 0 )) && [[ $(awk '$1=="$FileOwner"{print $2}' /etc/rsyslog.conf) != syslog ]]
+}
+fix_U67(){
+  [[ $LOG_OWNER_MODE == skip ]] && { FIX_MSG="LOG_OWNER_MODE=skip"; return 10; }
+  local f R=/etc/rsyslog.conf
+  if [[ -f $R ]]; then
+    backup_file $R
+    sed -i -E 's/^[[:space:]]*\$FileOwner[[:space:]]+.*/$FileOwner root/' $R
+    grep -qE '^\$FileOwner' $R || sed -i '1i $FileOwner root' $R
+    sed -i -E 's/^([[:space:]]*\$PrivDropTo(User|Group)[[:space:]].*)$/# [N2SF U-67] \1/' $R
+    sed -i -E 's/^[[:space:]]*\$FileCreateMode[[:space:]]+.*/$FileCreateMode 0640/' $R
+    rsyslogd -N1 >>"$LOG_FILE" 2>&1 || { rollback_item; FIX_MSG="rsyslog 구문 오류 → 원복"; return 1; }
+    ok "rsyslog: FileOwner root / PrivDrop 해제(root 구동) / FileCreateMode 0640"
+  fi
+  local cnt=0
+  while read -r f; do [[ -z $f ]] && continue; record_mode "$f"; chown root "$f"; chmod o-rwx,g-wx "$f"; cnt=$((cnt+1)); done < <(u67_targets)
+  [[ -d /var/spool/rsyslog ]] && chown root /var/spool/rsyslog 2>/dev/null
+  has_systemd && systemctl restart rsyslog >>"$LOG_FILE" 2>&1; sleep 2
+  ok "로그 파일 ${cnt}건 소유자 root/권한 640 이하 변경 (하위 디렉터리·타 서비스 소유 파일 제외)"
+  local tag="N2SF-U67-TEST-$$-$RANDOM"; logger -p user.notice "$tag"; sleep 2
+  if grep -qs "$tag" /var/log/syslog; then ok "rsyslog 기록 정상(root 소유 파일 쓰기 확인)"
+  else err "rsyslog 기록 실패 → 원복"; rollback_item; FIX_MSG="로그 기록 실패로 원복"; return 1; fi
+  ev "[rsyslog 구동계정] $(ps -o user= -C rsyslogd 2>/dev/null | head -1)"
+  FIX_MSG="${cnt}건 변경 / 예외: /var/log 하위 서비스 디렉터리(mysql·redis 등) / 주의: rsyslog root 구동(권한 분리 약화, 점검기준 충족 목적)"; return 0
+}
+
+# ----------------------------------------------------------------------------
+# 3. 실행 엔진
+# ----------------------------------------------------------------------------
+add_result(){ R_ID+=("$1"); R_NAME+=("$2"); R_PRE+=("$3"); R_POST+=("$4"); R_STATUS+=("$5"); R_IMPL+=("$6"); R_MSG+=("$7"); }
+selected(){
+  local id=$1
+  [[ -n $ONLY && ,$ONLY, != *",$id,"* ]] && return 1
+  [[ -n $SKIP && ,$SKIP, == *",$id,"* ]] && return 1
+  return 0
+}
+run_item(){
+  local id=$1 name=$2 fid=${1//-/} pre post st impl rc msg
+  CUR_ID=$id; CHK_MSG=""; FIX_MSG=""
+  printf '\n%s━━ [%s] %s %s\n' "$C_C" "$id" "$name" "$C_0"
+  ev "================ [$id] $name  ($(date '+%F %T')) ================"
+  local exr; exr=$(exception_reason "$id")
+  if [[ -n $exr ]]; then warn "예외: $exr"; ev "예외: $exr"; add_result "$id" "$name" "-" "-" "예외" "예외" "$exr"; return; fi
+  # SNMP 항목(U-58~61)은 한 번의 설정으로 함께 조치되므로 첫 SNMP 항목 시점에 일괄 사전점검
+  if [[ $id =~ ^U-(58|59|60|61)$ ]] && (( ! SNMP_PRE_DONE )); then
+    SNMP_PRE_DONE=1; local sid
+    for sid in U-58 U-59 U-60 U-61; do selected "$sid" || continue
+      CUR_ID=$sid; CUR_PHASE=pre; ev "---- 사전 점검 (SNMP 일괄, $(date '+%T')) ----"
+      if "chk_${sid//-/}"; then PRE_CACHE[$sid]="양호"; else PRE_CACHE[$sid]="취약"; fi; PRE_MSG[$sid]=$CHK_MSG
+    done; CUR_ID=$id
+  fi
+  CUR_PHASE=pre
+  if [[ -n ${PRE_CACHE[$id]:-} ]]; then pre=${PRE_CACHE[$id]}; CHK_MSG=${PRE_MSG[$id]}
+  else ev "---- 사전 점검 ----"; if "chk_$fid"; then pre="양호"; else pre="취약"; fi; fi
+  local pre_msg=$CHK_MSG
+  [[ $pre == 양호 ]] && ok "사전점검: 양호 ($pre_msg)" || warn "사전점검: 취약 ($pre_msg)"
+  if [[ $pre == 양호 ]]; then add_result "$id" "$name" "양호" "-" "양호(유지)" "Y" "$pre_msg"; return; fi
+  if [[ $MODE == check ]]; then add_result "$id" "$name" "취약" "-" "취약" "N" "$pre_msg"; return; fi
+  if (( STEP_MODE )) && ! ask_yn "[$id] 조치를 진행할까요?" y; then add_result "$id" "$name" "취약" "-" "미조치(건너뜀)" "N" "사용자 선택"; return; fi
+  ev "---- 조치 ----"
+  "fix_$fid"; rc=$?
+  msg=$FIX_MSG
+  case $rc in
+    10) add_result "$id" "$name" "$pre" "-" "예외" "예외" "$msg"; warn "예외: $msg"; return ;;
+    20) add_result "$id" "$name" "$pre" "-" "수동확인" "N" "$msg"; warn "수동 확인 필요: $msg"; pause; return ;;
+    30) add_result "$id" "$name" "$pre" "원복" "롤백" "N" "$msg"; warn "$msg"; pause; return ;;
+  esac
+  pause "$POST_WAIT"
+  ev "---- 사후 검증 ----"; CUR_PHASE=post
+  if "chk_$fid"; then post="양호"; else post="취약"; fi
+  if [[ $rc == 1 ]]; then if [[ -n ${ROLLED[$id]:-} ]]; then st="롤백"; else st="실패"; fi; impl="N"
+  elif [[ $post == 양호 && $rc == 0 ]]; then st="조치완료"; impl="Y"
+  elif [[ $rc == 21 ]]; then st="부분조치"; impl="P"
+  else st="실패"; impl="N"; fi
+  if [[ $st == 실패 && $ROLLBACK_ON_FAIL == yes && $rc != 1 ]]; then rollback_item; st="롤백"; fi
+  case $st in 조치완료) ok "사후검증: 양호 → 조치완료 ($CHK_MSG)";; 부분조치) warn "사후검증: $post → 부분조치 ($CHK_MSG)";; *) err "사후검증: $post → $st ($CHK_MSG)";; esac
+  add_result "$id" "$name" "$pre" "$post" "$st" "$impl" "$msg | $CHK_MSG"
+  pause
+}
+
+print_summary(){
+  local i n=${#R_ID[@]} c_ok=0 c_fix=0 c_p=0 c_m=0 c_f=0 c_e=0 c_v=0 col
+  printf '\n%s══════════════════════════════════════════════════════════════════════════════%s\n' "$C_B" "$C_0"
+  printf ' N2SF 조치 결과  |  %s (%s)  role=%s  mode=%s\n' "$HOST" "$IPADDR" "$ROLE" "$MODE"
+  printf '%s══════════════════════════════════════════════════════════════════════════════%s\n' "$C_B" "$C_0"
+  printf ' %-5s %-6s %-6s %-12s %-4s %s\n' "CODE" "조치전" "조치후" "결과" "이행" "항목"
+  for ((i=0;i<n;i++)); do
+    case ${R_STATUS[$i]} in 조치완료) col=$C_G; ((c_fix++));; "양호(유지)") col=$C_G; ((c_ok++));; 부분조치) col=$C_Y; ((c_p++));;
+      수동확인) col=$C_Y; ((c_m++));; 예외) col=$C_C; ((c_e++));; 취약) col=$C_R; ((c_v++));; *) col=$C_R; ((c_f++));; esac
+    printf ' %-5s %-6s %-6s %s%-12s%s %-4s %s\n' "${R_ID[$i]}" "${R_PRE[$i]}" "${R_POST[$i]}" "$col" "${R_STATUS[$i]}" "$C_0" "${R_IMPL[$i]}" "${R_NAME[$i]}"
+  done
+  printf '%s──────────────────────────────────────────────────────────────────────────────%s\n' "$C_B" "$C_0"
+  printf ' 조치완료 %d | 양호유지 %d | 부분조치 %d | 수동확인 %d | 예외 %d | 실패/롤백 %d | 취약(점검) %d\n' $c_fix $c_ok $c_p $c_m $c_e $c_f $c_v
+  (( ${#GATES_AUTO[@]} )) && printf '   %s▲ --yes 로 자동 승인된 안전 게이트: %s (새 세션 접속 확인 수행 여부 점검)%s\n' "$C_Y" "${GATES_AUTO[*]}" "$C_0"
+  # 판단 필요 항목 상세
+  for ((i=0;i<n;i++)); do
+    case ${R_STATUS[$i]} in 조치완료|"양호(유지)") ;; *) printf '   %s▶ %s%s %s\n' "$C_Y" "${R_ID[$i]}" "$C_0" "${R_MSG[$i]}";; esac
+  done
+  printf '\n 결과 CSV  : %s\n 증적      : %s/\n 실행 로그 : %s\n' "$CSV_FILE" "$EVID_DIR" "$LOG_FILE"
+  [[ $MODE == apply ]] && printf ' 전체 원복 : sudo bash %s/rollback.sh\n' "$BK_DIR"
+  echo
+}
+write_csv(){
+  local i
+  { printf '\xEF\xBB\xBF'
+    echo "호스트,IP,역할,CODE,항목,조치전,조치후,결과,이행점검(Y/P/N),상세,수행일시"
+    for ((i=0;i<${#R_ID[@]};i++)); do
+      printf '"%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s"\n' "$HOST" "$IPADDR" "$ROLE" "${R_ID[$i]}" "${R_NAME[$i]}" "${R_PRE[$i]}" "${R_POST[$i]}" "${R_STATUS[$i]}" "${R_IMPL[$i]}" "${R_MSG[$i]//\"/\'}" "$RUN_TS"
+    done; } >"$CSV_FILE"
+}
+
+detect_role(){
+  [[ $ROLE == pdp || $ROLE == pep ]] && return
+  local h; h=$(hostname | tr '[:lower:]' '[:upper:]')
+  if [[ $h == *PEP* || -d /var/connect/gateway || -n $(pam_custom_stack) ]]; then ROLE=pep
+  elif [[ $h == *PDP* ]]; then ROLE=pdp
+  else ROLE=pdp; warn "역할 자동판별 불가 → pdp 로 간주(--role 로 지정 가능)"; fi
+}
+
+usage(){ awk 'NR>=2{ if(/^# =+$/) c++; print; if(c==2) exit }' "$SCRIPT_PATH" | sed 's/^# \{0,1\}//'; exit 0; }
+
+# ----------------------------------------------------------------------------
+# 4. main
+# ----------------------------------------------------------------------------
+CONFIG_EXPLICIT=0; ORDER_MODE=0; STRICT=0; DELAY_CLI=""; WAIT_CLI=""
+need_val(){ [[ -n ${2:-} && $2 != -* ]] || die "옵션 $1 에는 값이 필요합니다."; }
+valid_id(){ local it; for it in "${ITEMS[@]}"; do [[ ${it%%|*} == "$1" ]] && return 0; done; return 1; }
+item_name(){ local it; for it in "${ITEMS[@]}"; do [[ ${it%%|*} == "$1" ]] && { echo "${it#*|}"; return; }; done; }
+parse_ids(){ # OPT RAW → PARSED_ARR (대문자·중복 제거, 형식/존재 검증)
+  local opt=$1 raw=${2^^} id; PARSED_ARR=()
+  raw=${raw//[[:space:]]/}
+  while [[ $raw == *,,* ]]; do raw=${raw//,,/,}; done; raw=${raw#,}; raw=${raw%,}
+  [[ $raw =~ ^U-[0-9]{2}(,U-[0-9]{2})*$ ]] || die "$opt 항목 형식 오류: '$2' (예: U-01,U-62 / --list 로 확인)"
+  for id in ${raw//,/ }; do
+    valid_id "$id" || die "$opt: 존재하지 않는 항목 $id (--list 로 확인)"
+    [[ " ${PARSED_ARR[*]} " == *" $id "* ]] || PARSED_ARR+=("$id")
+  done
+}
+if [[ ${N2SF_SOURCE_ONLY:-0} == 1 ]]; then return 0 2>/dev/null || exit 0; fi   # 단위 테스트용(함수만 로드)
+_av=(); for _a in "$@"; do if [[ $_a == --*=* ]]; then _av+=("${_a%%=*}" "${_a#*=}"); else _av+=("$_a"); fi; done
+set -- "${_av[@]}"
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    --check) MODE=check;; -y|--yes) ASSUME_YES=1;; --step) STEP_MODE=1;; --order|--keep-order) ORDER_MODE=1;; --strict) STRICT=1;;
+    --delay) need_val "$1" "${2:-}"; [[ $2 =~ ^[0-9]+$ ]] || die "--delay 는 숫자(초)여야 합니다: $2"; DELAY_CLI=$2; STEP_DELAY=$2; shift;;
+    --wait)  need_val "$1" "${2:-}"; [[ $2 =~ ^[0-9]+$ ]] || die "--wait 는 숫자(초)여야 합니다: $2"; WAIT_CLI=$2; POST_WAIT=$2; shift;;
+    --role)  need_val "$1" "${2:-}"; ROLE_ARG=${2,,}; [[ $ROLE_ARG == pdp || $ROLE_ARG == pep ]] || die "--role 은 pdp 또는 pep: $2"; shift;;
+    --config) need_val "$1" "${2:-}"; CONFIG_FILE=$2; CONFIG_EXPLICIT=1; shift;;
+    --only|--skip)
+      _opt=$1; need_val "$_opt" "${2:-}"; shift; _val=$1
+      while [[ -n ${2:-} && $2 != -* ]]; do _val+=",$2"; shift; done
+      parse_ids "$_opt" "$_val"
+      for _id in "${PARSED_ARR[@]}"; do
+        if [[ $_opt == --only ]]; then [[ " ${ONLY_ARR[*]} " == *" $_id "* ]] || ONLY_ARR+=("$_id")
+        else [[ " ${SKIP_ARR[*]} " == *" $_id "* ]] || SKIP_ARR+=("$_id"); fi
+      done;;
+    --rollback) need_val "$1" "${2:-}"; RB_DIR=$2; shift;;
+    --list) for it in "${ITEMS[@]}"; do printf '  %s  %s\n' "${it%%|*}" "${it#*|}"; done; exit 0;;
+    -h|--help) usage;;
+    *) die "알 수 없는 옵션: $1";;
+  esac; shift
+done
+ONLY=$(IFS=,; echo "${ONLY_ARR[*]}"); SKIP=$(IFS=,; echo "${SKIP_ARR[*]}")
+(( ORDER_MODE )) && [[ -z $ONLY ]] && die "--order 는 --only 와 함께 사용하십시오."
+(( STRICT )) && [[ $MODE != check ]] && die "--strict 는 --check 와 함께 사용하십시오."
+conf_safe(){ local o m d dm; o=$(stat -c '%u' "$1"); m=$(stat -c '%a' "$1")
+  [[ $o == 0 ]] || die "설정 파일 소유자가 root 가 아닙니다: $1"
+  (( (8#$m & 8#022) == 0 )) || die "설정 파일에 그룹/기타 쓰기 권한이 있습니다($m) → chmod 600 $1"
+  d=$(dirname "$(readlink -f "$1")"); dm=$(stat -c '%a' "$d")
+  (( (8#$dm & 8#022) == 0 )) || warn "설정 파일이 있는 디렉터리($d)에 그룹/기타 쓰기 권한이 있습니다($dm) → 파일 교체 위험"; }
+
+# 설정값 검증: 오타·잘못된 값으로 의도와 다르게 동작(예: 존재하지 않는 배너 파일 → 기본 문구)하는 것을 사전 차단
+conf_validate(){
+  local e="" n v
+  _num(){ for n in "$@"; do [[ ${!n} =~ ^[0-9]+$ ]] || e+=$'\n'"  - $n : 숫자여야 함 (현재: '${!n}')"; done; }
+  _enum(){ local nm=$1; shift; [[ " $* " == *" ${!nm} "* ]] || e+=$'\n'"  - $nm : {$*} 중 하나여야 함 (현재: '${!nm}')"; }
+  _num STEP_DELAY POST_WAIT GATE_TIMEOUT FW_GATE_TIMEOUT PASS_MIN_DAYS PASS_MAX_DAYS PASS_WARN_AGE PW_MINLEN PW_REMEMBER \
+       FAILLOCK_DENY FAILLOCK_UNLOCK FAILLOCK_ROOT_UNLOCK TMOUT_SEC NTP_POLL_MIN NTP_POLL_MAX NTP_SYNC_WAIT
+  [[ -z $LOG_ROTATE_COUNT ]] || _num LOG_ROTATE_COUNT
+  for n in CHAGE_EXISTING CHAGE_FORCE ALLOW_APT U02_PEP_APPLY ROLLBACK_ON_FAIL FAILLOCK_EVEN_DENY_ROOT SU_RESTRICT_PERM GSHADOW_TOO LOG_ENABLE_MESSAGES; do
+    _enum "$n" yes no; done
+  _enum FW_MODE tcpwrapper iptables both; _enum PATCH_MODE report security full
+  _enum U20_SVC_MODE dropin chmod exception; _enum LOG_OWNER_MODE root-rsyslog skip; _enum ROLE auto pdp pep
+  [[ -z $SNMP_MODE ]] || _enum SNMP_MODE disable v3 v3v2c skip
+  [[ $REPORT_BASE == /?* ]] || e+=$'\n'"  - REPORT_BASE : 절대경로여야 함 (현재: '$REPORT_BASE')"
+  [[ -z $BANNER_FILE || -s $BANNER_FILE ]] || e+=$'\n'"  - BANNER_FILE : 파일이 없거나 비어 있음 ($BANNER_FILE) → 지정하지 않으면 기본 경고문이 적용되므로 오류 처리"
+  [[ -z $PWQ_DEB_DIR || -d $PWQ_DEB_DIR ]] || e+=$'\n'"  - PWQ_DEB_DIR : 디렉터리가 없음 ($PWQ_DEB_DIR)"
+  for n in $MGMT_ALLOW_NETS $SNMP_NMS_HOSTS; do
+    [[ $n == *:* ]] && continue
+    [[ $n =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})(/([0-9]{1,2}))?$ ]] \
+      && (( BASH_REMATCH[1]<=255 && BASH_REMATCH[2]<=255 && BASH_REMATCH[3]<=255 && BASH_REMATCH[4]<=255 && ${BASH_REMATCH[6]:-0}<=32 )) \
+      || e+=$'\n'"  - MGMT_ALLOW_NETS/SNMP_NMS_HOSTS : IPv4 또는 CIDR 형식 오류 ('$n')"
+  done
+  [[ -z $e ]] || die "설정값 오류 ($CONFIG_FILE):$e"
+}
+
+# 설정 파일 로드(필수): 없으면 종료. 단, 롤백은 conf 가 없거나 깨져도 복구할 수 있어야 하므로 읽지 않음
+if [[ -z $RB_DIR ]]; then
+  if [[ -f $CONFIG_FILE ]]; then
+    conf_safe "$CONFIG_FILE"
+    bash -n "$CONFIG_FILE" 2>/dev/null || die "설정 파일 문법 오류: $CONFIG_FILE  (확인: bash -n $CONFIG_FILE)"
+    # shellcheck disable=SC1090
+    source "$CONFIG_FILE"; CFG_LOADED=1
+    if grep -qE '^(SNMPV3_(AUTH|PRIV)_PASS|SNMP_V2C_COMMUNITY)="[^"]+"' "$CONFIG_FILE" && (( 8#$(stat -c '%a' "$CONFIG_FILE") & 8#044 )); then
+      warn "설정 파일에 암호/community 가 있는데 읽기 권한이 넓습니다 → chmod 600 $CONFIG_FILE"
+    fi
+  elif [[ -e $CONFIG_FILE ]]; then die "설정 파일이 일반 파일이 아닙니다: $CONFIG_FILE"
+  else
+    die "설정 파일이 없어 실행할 수 없습니다: $CONFIG_FILE
+      점검(--check)과 조치 모두 설정 파일(n2sf_hardening.conf)이 필요합니다.
+      · 설정 파일을 스크립트와 같은 폴더에 두거나 --config 로 경로를 지정하십시오."
+  fi
+  # CLI 로 준 값이 설정 파일보다 우선
+  [[ -n $DELAY_CLI ]] && STEP_DELAY=$DELAY_CLI
+  [[ -n $WAIT_CLI ]] && POST_WAIT=$WAIT_CLI
+  [[ -n ${ROLE_ARG:-} ]] && ROLE=$ROLE_ARG
+  conf_validate
+fi
+if [[ ( $MODE == apply || -n $RB_DIR ) && $ASSUME_YES -eq 0 && ! -t 0 ]]; then
+  die "비대화형(tty 없음) 세션에서는 조치/원복을 실행하지 않습니다. 터미널에서 실행하거나, 콘솔을 확보한 뒤 --yes 를 명시하십시오."
+fi
+[[ -n ${ROLE_ARG:-} ]] && ROLE=$ROLE_ARG
+
+if [[ -n $RB_DIR ]]; then
+  [[ -f $RB_DIR/manifest ]] || die "백업 manifest 없음: $RB_DIR"
+  LOG_FILE="$RB_DIR/rollback_$(date +%Y%m%d_%H%M%S).log"; CUR_ID="ROLLBACK"
+  _pend=$(awk -F'|' '$1=="ROLLEDBACK"{r[$2]=1} $1!="ROLLEDBACK" && $2!=""{a[$2]=1} END{for(i in a) if(!(i in r)) n++; print n+0}' "$RB_DIR/manifest")
+  (( _pend )) || { info "이미 원복되었거나 원복할 변경이 없습니다(재실행 방지): $RB_DIR"
+                   info "다시 원복해야 한다면 manifest 의 ROLLEDBACK 줄을 삭제한 뒤 실행하십시오(그 사이의 설정 변경이 백업 시점으로 되돌아갑니다)."; exit 0; }
+  echo "  전체 원복 대상: $RB_DIR  (미원복 항목 ${_pend}개)"
+  ask_yn "manifest 기준으로 모든 변경을 원복합니다. 진행할까요?" n || exit 0
+  do_rollback "$RB_DIR" | tee -a "$LOG_FILE"; post_rollback_refresh
+  ok "원복 완료 (로그: $LOG_FILE)"; exit 0
+fi
+
+exec 9>/run/n2sf_hardening.lock; flock -n 9 || die "이미 실행 중입니다."
+HOST=$(hostname); IPADDR=$(primary_ip); IPADDR=${IPADDR:-$(hostname -I 2>/dev/null | awk '{print $1}')}
+RUN_TS=$(date '+%F %T'); TS=$(date +%Y%m%d_%H%M%S)
+BK_DIR="$REPORT_BASE/${HOST}_${TS}"; [[ $MODE == check ]] && BK_DIR="$REPORT_BASE/${HOST}_${TS}_check"
+while [[ -e $BK_DIR ]]; do BK_DIR+="_$RANDOM"; done
+mkdir -p "$BK_DIR/evidence"; chmod 700 "$REPORT_BASE" "$BK_DIR"
+EVID_DIR="$BK_DIR/evidence"; LOG_FILE="$BK_DIR/run.log"; MANIFEST="$BK_DIR/manifest"; CSV_FILE="$BK_DIR/result_${HOST}.csv"
+: >"$MANIFEST"
+detect_role
+
+printf '\n%s╔════════════════════════════════════════════════════════════════════════════╗%s\n' "$C_B" "$C_0"
+printf '%s║%s  N2SF UNIX 서버 취약점 조치 스크립트 (Ubuntu 24.04)   v%-20s%s║%s\n' "$C_B" "$C_0" "$SCRIPT_VERSION" "$C_B" "$C_0"
+printf '%s╚════════════════════════════════════════════════════════════════════════════╝%s\n' "$C_B" "$C_0"
+. /etc/os-release 2>/dev/null
+info "호스트: $HOST ($IPADDR) / OS: ${PRETTY_NAME:-?} / 역할: ${ROLE^^}"
+info "모드: $MODE / 대기: 항목간 ${STEP_DELAY}s, 검증전 ${POST_WAIT}s / 설정파일: $([[ -n ${CFG_LOADED:-} ]] && echo "$CONFIG_FILE" || echo 기본값)"
+[[ ${VERSION_ID:-} == 24.04 ]] || warn "Ubuntu 24.04 가 아닙니다(${VERSION_ID:-?}). 결과를 반드시 검토하십시오."
+has_systemd || warn "systemd 미구동 환경 - 서비스 재기동/검증 일부 생략"
+info "결과 저장: $BK_DIR"
+if [[ $MODE == apply ]]; then
+  echo
+  info "주요 결정값  NTP=$(ntp_target || true)  SNMP_MODE=${SNMP_MODE:-미정(대화형)}  MGMT_ALLOW_NETS=${MGMT_ALLOW_NETS:-미입력(U-28 수동)}"
+  info "             U20_SVC_MODE=$U20_SVC_MODE  PATCH_MODE=$PATCH_MODE  CHAGE_EXISTING=$CHAGE_EXISTING"
+  _man=""
+  [[ -z ${MGMT_ALLOW_NETS// } ]] && selected U-28 && _man+="U-28(MGMT_ALLOW_NETS) "
+  [[ -z $SNMP_MODE ]] && snmp_running && selected U-58 && _man+="U-58~61(SNMP_MODE$( (( ASSUME_YES )) && echo ' 미지정 → 수동확인' || echo ' 대화형 선택')) "
+  [[ $PATCH_MODE == report ]] && selected U-64 && _man+="U-64(PATCH_MODE=report) "
+  [[ -z $(ntp_target) ]] && selected U-65 && _man+="U-65(NTP_SERVERS) "
+  [[ -n $_man ]] && warn "입력값 미지정으로 수동확인이 예상되는 항목: $_man"
+  warn "SSH/PAM 변경 항목은 '현재 세션 유지 + 새 세션 접속 확인' 게이트를 거칩니다. root 콘솔(IPMI/VM 콘솔) 확보 권장."
+  ask_yn "위 설정으로 조치를 진행할까요?" y || exit 0
+  cp -a "$SCRIPT_PATH" "$BK_DIR/n2sf_u2404_hardening.sh"; [[ -f $CONFIG_FILE ]] && { cp -a "$CONFIG_FILE" "$BK_DIR/"; chmod 600 "$BK_DIR/$(basename "$CONFIG_FILE")"; }
+  printf '#!/bin/bash\n# 전체 원복: %s\nexec bash "%s/n2sf_u2404_hardening.sh" --rollback "%s" "$@"\n' "$RUN_TS" "$BK_DIR" "$BK_DIR" >"$BK_DIR/rollback.sh"; chmod 700 "$BK_DIR/rollback.sh"
+fi
+trap 'echo; warn "중단됨(진행 중 항목: $CUR_ID). 부분 원복: sudo bash $BK_DIR/rollback.sh"; write_csv; print_summary; exit 130' INT TERM
+
+if (( ORDER_MODE )); then
+  for id in "${ONLY_ARR[@]}"; do selected "$id" && RUN_IDS+=("$id"); done
+  warn "--order: 지정한 순서로 실행합니다(항목 간 의존: sshd_config·PAM·rsyslog 공유). 원복은 manifest 역순으로 처리됩니다."
+else
+  for it in "${ITEMS[@]}"; do id=${it%%|*}; selected "$id" && RUN_IDS+=("$id"); done
+fi
+(( ${#RUN_IDS[@]} )) || { warn "실행할 항목이 없습니다(--only/--skip 확인)."; }
+[[ -n $ONLY || -n $SKIP ]] && info "실행 항목: ${RUN_IDS[*]:-없음}"
+_sn=0; for id in U-58 U-59 U-60 U-61; do selected "$id" && _sn=$((_sn+1)); done
+(( _sn > 0 && _sn < 4 )) && warn "SNMP 항목(U-58~61)은 하나의 설정으로 함께 조치됩니다. 일부만 지정해도 SNMP 설정 전체가 변경됩니다."
+for id in "${RUN_IDS[@]}"; do
+  run_item "$id" "$(item_name "$id")"
+done
+CUR_ID="END"
+write_csv
+print_summary
+# 이행 점검 결과 미충족 시 종료코드 2
+for s in "${R_STATUS[@]}"; do [[ $s == 실패 || $s == 롤백 ]] && exit 2; done
+if [[ $MODE == check ]] && (( STRICT )); then for s in "${R_STATUS[@]}"; do [[ $s == 취약 ]] && exit 3; done; fi
+exit 0

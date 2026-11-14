@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  폐쇄망 U-02(pwquality)용 .deb 번들 생성 — 인터넷이 되는 Ubuntu 24.04 (amd64)에서 실행
+#    ./make_pwq_bundle.sh [출력디렉터리(기본 ./pwq_bundle)]
+#  결과: *.deb 9개 + SHA256SUMS  → 폐쇄망 서버로 옮기고 conf 의 PWQ_DEB_DIR 에 경로 지정
+#  9개인 이유: cracklib-runtime 이 file(→libmagic1t64, libmagic-mgc)에 필수 의존하고,
+#             사전(wamerican)이 없으면 cracklib 검사가 실패해 비밀번호 변경이 거부될 수 있음.
+# =============================================================================
+set -euo pipefail
+OUT=${1:-./pwq_bundle}
+PKGS=(libpam-pwquality libpwquality1 libpwquality-common libcrack2 cracklib-runtime wamerican file libmagic1t64 libmagic-mgc)
+. /etc/os-release
+[[ ${VERSION_ID:-} == 24.04 ]] || { echo "Ubuntu 24.04 에서 실행하십시오 (현재: ${PRETTY_NAME:-?})"; exit 1; }
+[[ $(dpkg --print-architecture) == amd64 ]] || echo "경고: amd64 가 아닙니다. 대상 서버 아키텍처와 같은지 확인하십시오."
+mkdir -p "$OUT"; cd "$OUT"
+apt-get download "${PKGS[@]}"
+sha256sum ./*.deb > SHA256SUMS
+echo "== 받은 파일 ($(ls -1 ./*.deb | wc -l)개)"; ls -1 ./*.deb
+echo "== 이 서버 기준, 번들 외에 추가로 필요한 패키지(최소 설치 서버에서는 더 있을 수 있음)"
+extra=$(apt-get -s install --no-install-recommends "${PKGS[@]}" 2>/dev/null | awk '/^Inst /{print $2}' | grep -vxF -f <(printf '%s\n' "${PKGS[@]}") || true)
+echo "${extra:-  (없음)}"
+cat <<MSG
+
+== 폐쇄망 서버에서 사전 검증(설치하지 않음):
+   cd <번들경로> && sha256sum -c SHA256SUMS && dpkg --dry-run -i ./*.deb
+   (의존성 오류가 나면 해당 패키지를 위 'apt-get download' 목록에 추가)
+MSG

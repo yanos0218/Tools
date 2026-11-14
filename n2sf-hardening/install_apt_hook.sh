@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  패키지 업데이트 후 권한 계열 항목(U-18/20/21/37) 자동 재점검 훅 (변경 없음, 점검만)
+#    sudo ./install_apt_hook.sh install|remove|status
+#  - apt/dpkg 종료 직후 --check 를 실행하고 /var/log/n2sf_recheck.log 에 기록,
+#    취약이 생기면 syslog(auth.warning)에 남깁니다. 자동 조치는 하지 않습니다.
+#  - 테스트용: N2SF_HOOK_ROOT=/임시경로 로 설치 위치를 바꿀 수 있습니다.
+# =============================================================================
+set -euo pipefail
+R=${N2SF_HOOK_ROOT:-}
+HOOK="$R/etc/apt/apt.conf.d/99-n2sf-recheck"; WRAP="$R/usr/local/sbin/n2sf_recheck.sh"
+HERE=$(dirname "$(readlink -f "$0")"); SCRIPT="$HERE/n2sf_u2404_hardening.sh"; CONF="$HERE/n2sf_hardening.conf"
+[[ $EUID -eq 0 ]] || { echo "root 로 실행하십시오"; exit 1; }
+case ${1:-} in
+install)
+  [[ -x $SCRIPT ]] || { echo "스크립트를 찾을 수 없음: $SCRIPT"; exit 1; }
+  base=$(. "$CONF" 2>/dev/null; echo "${REPORT_BASE:-/root/n2sf_hardening}")
+  [[ $base == /?* && $base != / ]] || { echo "REPORT_BASE 값이 올바르지 않음: $base"; exit 1; }
+  mkdir -p "$(dirname "$WRAP")" "$(dirname "$HOOK")"
+  cat >"$WRAP" <<WRAPEOF
+#!/bin/bash
+# [N2SF] apt/dpkg 직후 권한 계열 항목 재점검 (변경 없음). 실패해도 apt 를 막지 않습니다.
+S="$SCRIPT"; CONF="$CONF"; BASE="$base"; LOG=/var/log/n2sf_recheck.log
+[[ -x \$S && -f \$CONF ]] || exit 0
+args=(--check --strict --only U-18,U-20,U-21,U-37 --delay 0 --wait 0 --config "\$CONF")
+out=\$(timeout 300 "\$S" "\${args[@]}" 2>&1 </dev/null); rc=\$?
+grep -q '이미 실행 중' <<<"\$out" && exit 0
+{ date '+%F %T'; sed 's/\x1b\[[0-9;]*m//g' <<<"\$out" | grep -E '^ U-|조치 결과'; echo "rc=\$rc"; } >>"\$LOG" 2>/dev/null
+(( rc == 3 )) && logger -p auth.warning -t n2sf "패키지 변경 후 권한 계열 항목 취약 발생 - \$LOG 참조, 조치 스크립트 재실행 필요"
+ls -dt "\$BASE"/*_check 2>/dev/null | tail -n +11 | xargs -r rm -rf
+exit 0
+WRAPEOF
+  chmod 750 "$WRAP"
+  printf '// [N2SF] 패키지 변경 후 권한 계열 재점검(점검만)\nDPkg::Post-Invoke { "[ -x /usr/local/sbin/n2sf_recheck.sh ] && /usr/local/sbin/n2sf_recheck.sh || true"; };\n' >"$HOOK"
+  echo "설치됨: $HOOK , $WRAP  (결과: /var/log/n2sf_recheck.log)";;
+remove) rm -f "$HOOK" "$WRAP"; echo "제거됨";;
+status) [[ -f $HOOK ]] && echo "설치됨: $HOOK" || echo "미설치"; tail -n 12 /var/log/n2sf_recheck.log 2>/dev/null || true;;
+*) echo "사용법: $0 install|remove|status"; exit 1;;
+esac
