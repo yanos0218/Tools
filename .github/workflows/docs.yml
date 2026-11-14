@@ -9,11 +9,13 @@ on:
       - '**/*.md'
       - '.markdownlint.jsonc'
       - '.github/workflows/docs.yml'
+      - '.github/scripts/check_links.py'
   pull_request:
     paths:
       - '**/*.md'
       - '.markdownlint.jsonc'
       - '.github/workflows/docs.yml'
+      - '.github/scripts/check_links.py'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -32,3 +34,7 @@ jobs:
         with:
           globs: |
             **/*.md
+
+      # 상대 경로 링크가 실제 파일을 가리키는지 확인(markdownlint는 이걸 보지 않음)
+      - name: 링크 검사
+        run: python3 -I .github/scripts/check_links.py

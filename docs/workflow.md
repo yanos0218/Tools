@@ -48,4 +48,14 @@ flowchart LR
 
 ## 릴리즈
 
-아직 정하지 않음. 도구별 버전은 각 도구의 CHANGELOG에 적고 있으며, 태그 규칙은 정해지면 이 문서에 추가함.
+릴리즈는 사용자가 요청할 때만 컷하고, 그 사이 변경은 도구 CHANGELOG의 `[Unreleased]`에 쌓음.
+
+| 항목 | 규칙 |
+| --- | --- |
+| 태그 | `<도구>-vX.Y.Z` (예: `vulnerability-v2.0.0`). 도구마다 버전이 따로 감 |
+| 등급 | SemVer. 옵션·경로·설정 비호환은 MAJOR, 기능 추가는 MINOR, 수정은 PATCH |
+| CHANGELOG | `[Unreleased]`를 `[X.Y.Z] - 날짜`로 정리(Keep a Changelog, 영문 헤더) |
+| Release 제목 | `<도구>-vX.Y.Z - 한국어 제목` |
+| Release 노트 | 한국어 음슴체 |
+| 첨부 | 배포 묶음(tar.gz)과 SHA256SUMS |
+| 확인 | 태그 push와 Release 생성은 사용자 확인 뒤에 함 |

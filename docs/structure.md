@@ -13,6 +13,7 @@ flowchart TB
   root --> t2["다음 도구/<br/>도구 폴더(서브)"]
   t1 --> t1r["README.md<br/>입구"]
   t1 --> t1d["docs/<br/>주제별 상세·다이어그램"]
+  t1 --> t1s["conf/ · lib/ · items/ · tools/<br/>용도별 코드·설정"]
   t1 --> t1t["tests/<br/>회귀 테스트"]
   t1 --> t1c["CHANGELOG.md<br/>도구 이력"]
   gh --> w0["docs.yml<br/>전체 문서 검사"]
@@ -53,7 +54,12 @@ flowchart TB
 | `CHANGELOG.md` | 필수 | 도구별 버전 이력 |
 | `docs/` | README가 120줄을 넘으면 필수 | 주제별 상세 문서와 다이어그램(mermaid) |
 | `tests/` | 실행 코드가 있으면 필수 | 회귀 테스트. 도구 워크플로가 실행함 |
-| 설정 예시 파일 | 있으면 | 비밀 값은 비워 두고 커밋함 |
+| `conf/` | 설정 파일이 있으면 | 비밀 값은 비워 두고 커밋함 |
+| `lib/` | 공통 코드·자료가 있으면 | 여러 스크립트가 읽는 함수·표 |
+| `items/` | 항목 단위로 나뉘면 | 항목별 구현. 직접 실행도 가능 |
+| `tools/` | 보조 스크립트가 있으면 | 배포 묶음, 번들 생성 등 |
+
+실행 파일은 도구 폴더 바로 아래에 두고, 나머지는 위 용도별 폴더에 둠. vulnerability가 이 구성을 쓰며 이유는 [내부 구조](../vulnerability/docs/architecture.md) 참고.
 
 ## 이름 규칙
 
