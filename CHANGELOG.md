@@ -29,6 +29,7 @@
 
 - vulnerability 2.0.0: 이름 일반화(상세는 [vulnerability/CHANGELOG.md](vulnerability/CHANGELOG.md)). CI 테스트 경로를 `/opt/vuln` 으로 변경함.
 - vulnerability README를 입구로 줄이고 사용법·항목별 조치·결과물·원복 문서를 `vulnerability/docs/`로 분리함. 루트 README 문서 목록에 링크를 추가함.
+- vulnerability SNMP 항목 원복 시 표기·원복 대상 불일치 수정(#6).
 - vulnerability U-12 `TMOUT=${TMOUT:-600}` 구문 오류와 U-23 증적의 별도 마운트 누락 수정(#7).
 - vulnerability U-28 조치 안전성 보강(#3)과 libwrap 시험 추가(#4). CI에서 `tcpd`를 설치함.
 - vulnerability 조치 시 정해지지 않은 값(U-28·62·65·66)을 실행 중 선택하도록 함. 설정 파일을 선택 사항으로 바꿈(`conf/vuln_hardening.conf.example`). CI의 권한 보정 경로를 같이 고침.
