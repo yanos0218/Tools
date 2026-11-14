@@ -29,6 +29,13 @@
 - `vulnerability/n2sf_hardening.conf`에 실제 SNMP 암호·community·IP 정보를 채운 채 커밋하지 않는다. 채운 사본은 서버에서만 쓴다.
 - vulnerability 스크립트의 대상은 Ubuntu 24.04(amd64) 서버다. 맥에서 실행해 "동작 확인"이라고 쓰지 않는다.
 
+## 확정된 사실 (다시 검증하지 않는다)
+
+- 2026-11-14 CI(`ubuntu-24.04`, 실행 43536037384)가 패키지를 풀어 확인함
+  - `openssh-server 1:9.6p1-3ubuntu13.20`의 `sshd`는 `libwrap.so.0`을 직접 링크한다. 그래서 U-28 기본값 `FW_MODE=tcpwrapper`는 sshd에 유효하다.
+  - `snmpd 5.9.4+dfsg-1.1ubuntu3.3`는 `libwrap`을 직접 링크하지 않는다. 간접 링크(`ldd` 기준)는 미확인이다.
+  - 같은 확인이 [vulnerability.yml](.github/workflows/vulnerability.yml)의 "환경 확인" 단계로 매 실행 로그에 남는다.
+
 ## 기록 (날짜 + 무슨 일 + 앞으로의 규칙)
 
 - 2026-11-14
