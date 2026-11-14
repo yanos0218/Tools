@@ -30,6 +30,7 @@
 - vulnerability 2.0.0: 이름 일반화(상세는 [vulnerability/CHANGELOG.md](vulnerability/CHANGELOG.md)). CI 테스트 경로를 `/opt/vuln` 으로 변경함.
 - vulnerability README를 입구로 줄이고 사용법·항목별 조치·결과물·원복 문서를 `vulnerability/docs/`로 분리함. 루트 README 문서 목록에 링크를 추가함.
 - vulnerability CI에 점검·조치·원복 왕복 시험 job 추가(실험, 실패해도 CI 통과).
+  - 왕복 job은 회귀 테스트 job의 결과물을 쓰지 않으므로 `needs: test`를 없애 두 job을 동시에 실행함(약 12분 → 약 6분 예상).
 - vulnerability CI에 U-28 방화벽(iptables) 실제 적용 시험 추가(실험).
 - vulnerability CI에 가상 터미널 대화형 시험 추가(실험).
 - vulnerability 항목 선택 원복 추가(`--rollback DIR --only`, 메뉴). 충돌 시 거부함.
