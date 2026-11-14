@@ -33,6 +33,7 @@
   - 왕복 job은 회귀 테스트 job의 결과물을 쓰지 않으므로 `needs: test`를 없애 두 job을 동시에 실행함(약 12분 → 약 6분 예상).
 - vulnerability CI에 U-28 방화벽(iptables) 실제 적용 시험 추가(실험).
 - vulnerability CI에 가상 터미널 대화형 시험 추가(실험).
+- vulnerability CI에 SNMP 실서비스 시험 job 추가(실험, 왕복 job과 분리).
 - vulnerability 항목 선택 원복 추가(`--rollback DIR --only`, 메뉴). 충돌 시 거부함.
 - vulnerability 옵션 정리(2.0.0 breaking): `--order`, `--keep-order`, `--step` 제거.
 - vulnerability 조치 후 변경 파일 diff 기록과 faillock 안내 추가(#10 일부).
