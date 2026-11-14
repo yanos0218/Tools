@@ -34,6 +34,7 @@
 - vulnerability CI에 U-28 방화벽(iptables) 실제 적용 시험 추가(실험).
 - vulnerability CI에 가상 터미널 대화형 시험 추가(실험).
 - vulnerability CI에 SNMP 실서비스 시험 job 추가(실험, 왕복 job과 분리).
+- vulnerability CI의 왕복·SNMP 시험 job을 필수 검사로 올림(`continue-on-error` 제거, 같은 실행의 재실행까지 두 번 연속 통과 확인). 실패하면 전체 CI가 실패함.
 - vulnerability 항목 선택 원복 추가(`--rollback DIR --only`, 메뉴). 충돌 시 거부함.
 - vulnerability 옵션 정리(2.0.0 breaking): `--order`, `--keep-order`, `--step` 제거.
 - vulnerability 조치 후 변경 파일 diff 기록과 faillock 안내 추가(#10 일부).
