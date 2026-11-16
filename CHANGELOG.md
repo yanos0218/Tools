@@ -27,6 +27,7 @@
 
 ### Changed
 
+- [docs/workflow.md](docs/workflow.md)의 Release 제목 규칙을 `[<도구>] vX.Y.Z - 한국어 제목`으로 정하고 제목 길이·내용 기준을 추가함(태그 규칙은 그대로).
 - vulnerability CI에 항목별 독립 검증 시험(`ci_items.sh`) 단계를 추가함(상세는 [vulnerability/CHANGELOG.md](vulnerability/CHANGELOG.md)).
 - vulnerability CI 시험 보강(메뉴 선택 조치·백업 확인, 옛 표식 호환)과 서버 이름 `n2sf` → `vuln` 일괄 변경에 맞춰 시험·워크플로 경로를 갱신함(상세는 [vulnerability/CHANGELOG.md](vulnerability/CHANGELOG.md)).
 - vulnerability 2.0.0: 이름 일반화(상세는 [vulnerability/CHANGELOG.md](vulnerability/CHANGELOG.md)). CI 테스트 경로를 `/opt/vuln` 으로 변경함.
