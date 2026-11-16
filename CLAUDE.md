@@ -26,7 +26,7 @@
 - 도구 내용은 그 폴더(서브)에, 둘 이상의 도구에 공통인 내용만 루트 README와 `docs/`(메인)에 둔다. 서브 내용을 메인에 복사하지 않고 링크한다.
 - 도구를 고치면 같은 커밋에서 그 폴더의 CHANGELOG와 README를 갱신한다. 저장소 구조·CI가 바뀌면 루트 [CHANGELOG.md](CHANGELOG.md)도 갱신한다.
 - 도구 폴더 이름이나 워크플로 이름을 바꾸면 `**/*.md`와 `.github/`에서 옛 이름을 grep해 같은 커밋에서 고친다.
-- vulnerability 테스트 개수가 바뀌면 [vulnerability/README.md](vulnerability/README.md)의 개수(현재 196개)도 같은 커밋에서 고친다.
+- vulnerability 테스트 개수가 바뀌면 [vulnerability/README.md](vulnerability/README.md)의 개수(현재 195개)도 같은 커밋에서 고친다.
 - `vulnerability/conf/vuln_hardening.conf.example`(과 서버에서 복사한 `vuln_hardening.conf`)에 실제 SNMP 암호·community·IP 정보를 채운 채 커밋하지 않는다. 채운 사본은 서버에서만 쓴다.
 - vulnerability 스크립트의 대상은 Ubuntu 24.04(amd64) 서버다. 맥에서 실행해 "동작 확인"이라고 쓰지 않는다.
 
