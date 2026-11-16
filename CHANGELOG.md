@@ -1,6 +1,6 @@
 # Changelog
 
-이 저장소의 변경 이력. 형식은 [Keep a Changelog](https://keepachangelog.com/ko/1.1.0/) 기준. 도구별 이력은 각 도구 폴더의 CHANGELOG에 있음.
+이 저장소의 변경 이력. 형식은 [Keep a Changelog](https://keepachangelog.com/ko/1.1.0/) 기준. 저장소 공통(구조·CI·표준·문서 규칙)만 이 파일에 적고, 도구별 이력은 각 도구 폴더의 CHANGELOG에 있음.
 
 ## [Unreleased]
 
@@ -15,10 +15,9 @@
   - [docs/structure.md](docs/structure.md)에 구조도, 메인·서브 구분, 도구 폴더 규약, 이름 규칙
   - [docs/workflow.md](docs/workflow.md)에 변경 흐름, CI 구조, 새 도구 추가 절차
   - 루트 README에 도구 목록 표(분류·대상 환경·버전·검증)
-- [vulnerability/docs/architecture.md](vulnerability/docs/architecture.md) 신설(서브 문서, 다이어그램)
 - 워크플로
   - `docs.yml`은 저장소 전체 markdownlint
-  - `vulnerability.yml`은 `bash -n`, `shellcheck`, 회귀 테스트(`ubuntu-24.04`, root), libwrap 링크 확인(참고)
+  - `vulnerability.yml`은 문법·정적 분석, 회귀 테스트, 실제 서버 환경 시험(항목별 독립 검증, 점검·조치·원복 왕복, 방화벽, 대화형, SNMP)
 - 저장소 표준 파일
   - `CLAUDE.md`
   - `.gitignore`(비밀 파일 패턴)
@@ -28,22 +27,12 @@
 ### Changed
 
 - [docs/workflow.md](docs/workflow.md)의 Release 제목 규칙을 `[<도구>] vX.Y.Z - 한국어 제목`으로 정하고 제목 길이·내용 기준을 추가함(태그 규칙은 그대로).
-- vulnerability CI에 항목별 독립 검증 시험(`ci_items.sh`) 단계를 추가함(상세는 [vulnerability/CHANGELOG.md](vulnerability/CHANGELOG.md)).
-- vulnerability CI 시험 보강(메뉴 선택 조치·백업 확인, 옛 표식 호환)과 서버 이름 `n2sf` → `vuln` 일괄 변경에 맞춰 시험·워크플로 경로를 갱신함(상세는 [vulnerability/CHANGELOG.md](vulnerability/CHANGELOG.md)).
-- vulnerability 2.0.0: 이름 일반화(상세는 [vulnerability/CHANGELOG.md](vulnerability/CHANGELOG.md)). CI 테스트 경로를 `/opt/vuln` 으로 변경함.
-- vulnerability README를 입구로 줄이고 사용법·항목별 조치·결과물·원복 문서를 `vulnerability/docs/`로 분리함. 루트 README 문서 목록에 링크를 추가함.
-- vulnerability CI에 점검·조치·원복 왕복 시험 job 추가(실험, 실패해도 CI 통과).
-  - 왕복 job은 회귀 테스트 job의 결과물을 쓰지 않으므로 `needs: test`를 없애 두 job을 동시에 실행함(약 12분 → 약 6분 예상).
-- vulnerability CI에 U-28 방화벽(iptables) 실제 적용 시험 추가(실험).
-- vulnerability CI에 가상 터미널 대화형 시험 추가(실험).
-- vulnerability CI에 SNMP 실서비스 시험 job 추가(실험, 왕복 job과 분리).
-- vulnerability CI의 왕복·SNMP 시험 job을 필수 검사로 올림(`continue-on-error` 제거, 같은 실행의 재실행까지 두 번 연속 통과 확인). 실패하면 전체 CI가 실패함.
-- vulnerability 항목 선택 원복 추가(`--rollback DIR --only`, 메뉴). 충돌 시 거부함.
-- vulnerability 옵션 정리(2.0.0 breaking): `--order`, `--keep-order`, `--step` 제거.
-- vulnerability 조치 후 변경 파일 diff 기록과 faillock 안내 추가(#10 일부).
-- vulnerability SNMP 항목 원복 시 표기·원복 대상 불일치 수정(#6).
-- vulnerability U-12 `TMOUT=${TMOUT:-600}` 구문 오류와 U-23 증적의 별도 마운트 누락 수정(#7).
-- vulnerability U-28 조치 안전성 보강(#3)과 libwrap 시험 추가(#4). CI에서 `tcpd`를 설치함.
-- vulnerability 조치 시 정해지지 않은 값(U-28·62·65·66)을 실행 중 선택하도록 함. 설정 파일을 선택 사항으로 바꿈(`conf/vuln_hardening.conf.example`). CI의 권한 보정 경로를 같이 고침.
+- 문서 중복 정리
+  - 루트 README의 vulnerability 문서 링크 4개를 도구 README의 문서 목록 링크 하나로 모음.
+  - [docs/workflow.md](docs/workflow.md)의 CI 표를 실제 워크플로에 맞추고(링크 검사 추가), vulnerability 시험 내용은 도구 문서로 링크함.
+  - 이 파일에서 도구 변경 항목(옵션·항목 수정·이름 변경 등)을 빼고 도구 CHANGELOG에만 둠.
+- vulnerability 워크플로
+  - 도구별 파일로 분리하고 경로 필터를 추가함(도구 폴더가 바뀔 때만 해당 검사 실행).
+  - 항목별 독립 검증·방화벽·대화형·SNMP 시험을 추가하고, 왕복·SNMP 시험은 필수 검사로 올림(`continue-on-error` 제거). 왕복 job은 회귀 테스트와 동시에 실행함(`needs: test` 제거, 약 12분 → 약 6분 예상).
+  - CI 테스트 경로를 `/opt/vuln`으로 바꿈. 시험 내용은 [vulnerability/CHANGELOG.md](vulnerability/CHANGELOG.md) 참고.
 - 문서 정합성 정리: [docs/structure.md](docs/structure.md)에 용도별 하위 폴더 규약, [docs/workflow.md](docs/workflow.md)에 릴리즈 규칙(태그 `<도구>-vX.Y.Z`)을 추가함. 루트 README의 중복 표를 링크로 바꾸고, CLAUDE.md 읽기 목록에 도구 `docs/`를 넣음.
-- 워크플로를 도구별 파일로 분리하고 경로 필터를 추가함(도구 폴더가 바뀔 때만 해당 검사 실행).

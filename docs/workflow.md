@@ -20,8 +20,8 @@ flowchart LR
 
 | 워크플로 | 실행 조건(경로) | 검사 내용 |
 | --- | --- | --- |
-| [docs.yml](../.github/workflows/docs.yml) | `**/*.md`, `.markdownlint.jsonc` 변경 | 저장소 전체 markdownlint |
-| [vulnerability.yml](../.github/workflows/vulnerability.yml) | `vulnerability/**` 변경 | `bash -n`, `shellcheck`, 회귀 테스트(root), 실제 sshd 시험, libwrap 링크 확인(참고), 점검·조치·원복 왕복과 SNMP 실서비스 시험(필수, 회귀 테스트와 동시 실행) |
+| [docs.yml](../.github/workflows/docs.yml) | `**/*.md`, `.markdownlint.jsonc` 변경 | 저장소 전체 markdownlint와 상대 링크 검사 |
+| [vulnerability.yml](../.github/workflows/vulnerability.yml) | `vulnerability/**` 변경 | 문법·정적 분석·회귀 테스트와 실제 서버 환경 시험. 내용은 [운영 참고](../vulnerability/docs/operations.md#운영-참고) 참고 |
 
 - 러너는 모두 `ubuntu-24.04`. 대상 서버와 같은 환경임.
 - push는 `main`만, 브랜치 작업은 PR 이벤트로만 실행함.
