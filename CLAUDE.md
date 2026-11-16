@@ -26,7 +26,8 @@
 - 도구 내용은 그 폴더(서브)에, 둘 이상의 도구에 공통인 내용만 루트 README와 `docs/`(메인)에 둔다. 서브 내용을 메인에 복사하지 않고 링크한다.
 - 도구를 고치면 같은 커밋에서 그 폴더의 CHANGELOG와 README를 갱신한다. 저장소 구조·CI가 바뀌면 루트 [CHANGELOG.md](CHANGELOG.md)도 갱신한다.
 - 도구 폴더 이름이나 워크플로 이름을 바꾸면 `**/*.md`와 `.github/`에서 옛 이름을 grep해 같은 커밋에서 고친다.
-- vulnerability 테스트 개수가 바뀌면 [vulnerability/README.md](vulnerability/README.md)의 개수(현재 200개)도 같은 커밋에서 고친다.
+- vulnerability 항목(`items/U-xx.sh`)을 새로 만들거나 판정·조치를 바꿀 때는 가이드의 해당 항목 판단 기준·조치 방법 원문과 직접 대조하고, 다른 점은 같은 커밋에서 [vulnerability/docs/items.md](vulnerability/docs/items.md) 해당 행에 "자체 기준" 또는 "가이드와 다름"으로 적는다. 서브에이전트가 요약한 가이드 내용은 근거로 쓰지 않는다. 2026-11-16 #15에서 요약만 믿고 U-02 서술이 틀렸다. 가이드 원문 파일은 저장소에 커밋하지 않는다(저작물, 개정 있음).
+- vulnerability 테스트 개수가 바뀌면 [vulnerability/README.md](vulnerability/README.md)의 개수(현재 201개)도 같은 커밋에서 고친다.
 - `vulnerability/conf/vuln_hardening.conf.example`(과 서버에서 복사한 `vuln_hardening.conf`)에 실제 SNMP 암호·community·IP 정보를 채운 채 커밋하지 않는다. 채운 사본은 서버에서만 쓴다.
 - vulnerability 스크립트의 대상은 Ubuntu 24.04(amd64) 서버다. 맥에서 실행해 "동작 확인"이라고 쓰지 않는다.
 
