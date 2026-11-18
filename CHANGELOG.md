@@ -6,6 +6,7 @@
 
 ### Added
 
+- 이슈 양식 [.github/ISSUE_TEMPLATE/](.github/ISSUE_TEMPLATE/)(문제·할 일·research)와 [이슈 규칙](docs/workflow.md#이슈-규칙)(제목 `[툴이름] 제목`, 도구 라벨, 릴리즈별 마일스톤)
 - `docs.yml`에 상대 링크 검사 단계 추가([.github/scripts/check_links.py](.github/scripts/check_links.py))
 - 이 파일 신설
 - [vulnerability/](vulnerability/README.md) 이관
@@ -26,6 +27,8 @@
 
 ### Changed
 
+- `vulnerability.yml`의 왕복 작업 제한 시간을 20분에서 30분으로 늘림
+  - 항목이 63개로 늘어 항목별 독립 검증이 끝나는 시점이 20분에 걸려 취소됨(2026-11-18 CI 실행 44281566460, 시험 결과는 FAIL=0)
 - `vulnerability.yml`의 회귀 테스트 작업 제한 시간을 10분에서 20분으로 늘림
   - 항목이 48개로 늘어 시험이 10분을 넘겨 취소됨(2026-11-16 CI 실행 43890008646, VM 측정 6분 17초)
 - [docs/workflow.md](docs/workflow.md)의 Release 제목 규칙을 `[<도구>] vX.Y.Z - 한국어 제목`으로 정하고 제목 길이·내용 기준을 추가함(태그 규칙은 그대로).
