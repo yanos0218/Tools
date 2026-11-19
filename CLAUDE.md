@@ -15,6 +15,9 @@
   - `npx markdownlint-cli2@latest "**/*.md"` 실행. 설정은 [.markdownlint.jsonc](.markdownlint.jsonc)에 있다.
   - 버전을 `latest`로 쓰는 이유는 CI 액션이 최신 규칙을 쓰기 때문이다. 2026-11-14 옛 버전 로컬 검사는 통과했는데 CI에서 표 규칙 MD060으로 실패했다.
 - 셸 문법·정적 분석은 `bash -n <파일>`, 도구 폴더에서 `shellcheck -S warning <파일>`로 한다. 도구 폴더의 `.shellcheckrc`가 적용된다.
+- shellcheck는 CI(0.9.0)와 같은 버전으로 돌린다. 맥(0.11)은 CI가 잡는 경고를 놓친다(2026-11-19 `seen` 변수를 연관 배열로 오인하는 SC2190이 CI에서만 나옴).
+  - 맥의 `shellcheck`만으로 "통과"라고 쓰지 않는다.
+  - Multipass VM `vuln-test`(Ubuntu 24.04, shellcheck 0.9.0 설치됨)에 저장소를 올린 뒤 CI와 같은 명령(`cd vulnerability && shellcheck -S warning ./*.sh lib/*.sh tools/*.sh items/*.sh tests/*.sh`)을 실행한다.
 - vulnerability 회귀 테스트(`tests/run_tests.sh`)는 Ubuntu 24.04 root 전용이라 맥에서 실행하지 않는다. CI(`ubuntu-24.04`) 결과로만 "통과"라고 쓴다. CI 확인은 `gh run watch <실행ID> --exit-status`.
 - 로컬에서 못 돌린 검사는 "미검증"으로 쓴다.
 
@@ -28,7 +31,7 @@
 - 도구 폴더 이름이나 워크플로 이름을 바꾸면 `**/*.md`와 `.github/`에서 옛 이름을 grep해 같은 커밋에서 고친다.
 - vulnerability 항목(`items/U-xx.sh`)을 새로 만들거나 판정·조치를 바꿀 때는 가이드의 해당 항목 판단 기준·조치 방법 원문과 직접 대조하고, 다른 점은 같은 커밋에서 [vulnerability/docs/items.md](vulnerability/docs/items.md) 해당 행에 "자체 기준" 또는 "가이드와 다름"으로 적는다. 서브에이전트가 요약한 가이드 내용은 근거로 쓰지 않는다. 2026-11-16 #15에서 요약만 믿고 U-02 서술이 틀렸다. 가이드 원문 파일은 저장소에 커밋하지 않는다(저작물, 개정 있음).
 - vulnerability 항목은 가이드가 요구하는 점검·조치만 구현한다. 가이드의 판단 기준·조치 방법을 확인하거나 적용하는 데 꼭 필요한 것 외에는 더하지 않는다(포트 검사, 가이드에 없는 서비스·유닛 이름, 접속 보호용 사전 확인 등). 불가피한 해석은 [vulnerability/docs/items.md](vulnerability/docs/items.md)에 "자체 기준" 또는 "해석"으로 적는다. 2026-11-16 사용자 지시.
-- vulnerability 테스트 개수가 바뀌면 [vulnerability/README.md](vulnerability/README.md)의 개수(현재 468개)도 같은 커밋에서 고친다.
+- vulnerability 테스트 개수가 바뀌면 [vulnerability/README.md](vulnerability/README.md)의 개수(현재 480개)도 같은 커밋에서 고친다.
 - `vulnerability/conf/vuln_hardening.conf.example`(과 서버에서 복사한 `vuln_hardening.conf`)에 실제 SNMP 암호·community·IP 정보를 채운 채 커밋하지 않는다. 채운 사본은 서버에서만 쓴다.
 - vulnerability 스크립트의 대상은 Ubuntu 24.04(amd64) 서버다. 맥에서 실행해 "동작 확인"이라고 쓰지 않는다.
 
