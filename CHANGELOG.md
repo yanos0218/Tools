@@ -43,3 +43,7 @@
   - 항목별 독립 검증·방화벽·대화형·SNMP 시험을 추가하고, 왕복·SNMP 시험은 필수 검사로 올림(`continue-on-error` 제거). 왕복 job은 회귀 테스트와 동시에 실행함(`needs: test` 제거, 약 12분 → 약 6분 예상).
   - CI 테스트 경로를 `/opt/vuln`으로 바꿈. 시험 내용은 [vulnerability/CHANGELOG.md](vulnerability/CHANGELOG.md) 참고.
 - 문서 정합성 정리: [docs/structure.md](docs/structure.md)에 용도별 하위 폴더 규약, [docs/workflow.md](docs/workflow.md)에 릴리즈 규칙(태그 `<도구>-vX.Y.Z`)을 추가함. 루트 README의 중복 표를 링크로 바꾸고, CLAUDE.md 읽기 목록에 도구 `docs/`를 넣음.
+
+### Fixed
+
+- docs 링크 검사가 한글 파일명을 처리하지 못해 실패하던 문제(`git ls-files -z`로 변경, #33)
