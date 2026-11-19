@@ -7,7 +7,7 @@ from pathlib import Path
 from urllib.parse import unquote
 
 root = Path(subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip())
-files = subprocess.check_output(["git", "ls-files", "*.md"], cwd=root, text=True).split()
+files = [f for f in subprocess.check_output(["git", "ls-files", "-z", "*.md"], cwd=root, text=True).split("\0") if f]
 link = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
 bad = []
 checked = 0
