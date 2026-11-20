@@ -31,7 +31,7 @@
 - 도구 폴더 이름이나 워크플로 이름을 바꾸면 `**/*.md`와 `.github/`에서 옛 이름을 grep해 같은 커밋에서 고친다.
 - vulnerability 항목(`items/U-xx.sh`)을 새로 만들거나 판정·조치를 바꿀 때는 가이드의 해당 항목 판단 기준·조치 방법 원문과 직접 대조하고, 다른 점은 같은 커밋에서 [vulnerability/docs/items.md](vulnerability/docs/items.md) 해당 행에 "자체 기준" 또는 "가이드와 다름"으로 적는다. 서브에이전트가 요약한 가이드 내용은 근거로 쓰지 않는다. 2026-11-16 #15에서 요약만 믿고 U-02 서술이 틀렸다. 가이드 원문 파일은 저장소에 커밋하지 않는다(저작물, 개정 있음).
 - vulnerability 항목은 가이드가 요구하는 점검·조치만 구현한다. 가이드의 판단 기준·조치 방법을 확인하거나 적용하는 데 꼭 필요한 것 외에는 더하지 않는다(포트 검사, 가이드에 없는 서비스·유닛 이름, 접속 보호용 사전 확인 등). 불가피한 해석은 [vulnerability/docs/items.md](vulnerability/docs/items.md)에 "자체 기준" 또는 "해석"으로 적는다. 2026-11-16 사용자 지시.
-- vulnerability 테스트 개수가 바뀌면 [vulnerability/README.md](vulnerability/README.md)의 개수(현재 484개)도 같은 커밋에서 고친다.
+- vulnerability 테스트 개수가 바뀌면 [vulnerability/README.md](vulnerability/README.md)의 개수(현재 487개)도 같은 커밋에서 고친다.
 - vulnerability는 설정 파일을 두지 않는다(v6.0.0, #45). 스크립트 기본값 블록이나 시험·CI 스크립트에 실제 SNMP 암호·community·IP 정보를 채운 채 커밋하지 않는다. 시험 값은 환경변수 `VULN_<변수명>`으로만 넣고 임의 값을 쓴다.
 - vulnerability 스크립트의 대상은 Ubuntu 24.04(amd64) 서버다. 맥에서 실행해 "동작 확인"이라고 쓰지 않는다.
 
