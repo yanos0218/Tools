@@ -21,7 +21,7 @@ flowchart LR
 | 워크플로 | 실행 조건(경로) | 검사 내용 |
 | --- | --- | --- |
 | [docs.yml](../.github/workflows/docs.yml) | `**/*.md`, `.markdownlint.jsonc` 변경 | 저장소 전체 markdownlint와 상대 링크 검사 |
-| [vulnerability.yml](../.github/workflows/vulnerability.yml) | `vulnerability/**` 변경 | 문법·정적 분석·회귀 테스트와 실제 서버 환경 시험(회귀 테스트·왕복·항목별 독립 검증·SNMP, 4개 작업이 동시에 돎). 내용은 [운영 참고](../vulnerability/docs/operations.md#운영-참고) 참고 |
+| [vulnerability.yml](../.github/workflows/vulnerability.yml) | `vulnerability/**` 변경 | 문법·정적 분석·회귀 테스트와 실제 서버 환경 시험(회귀 테스트·왕복·항목별 독립 검증·SNMP, 4개 작업이 동시에 돎).<br>내용은 [운영 참고](../vulnerability/docs/operations.md#운영-참고) 참고 |
 
 - 러너는 모두 `ubuntu-24.04`. 대상 서버와 같은 환경임.
 - push는 `main`만, 브랜치 작업은 PR 이벤트로만 실행함.
@@ -70,7 +70,7 @@ flowchart LR
 | 태그 | `<도구>-vX.Y.Z` (예: `vulnerability-v2.0.0`). 도구마다 버전이 따로 감 |
 | 등급 | SemVer. 옵션·경로·설정 비호환은 MAJOR, 기능 추가는 MINOR, 수정은 PATCH |
 | CHANGELOG | `[Unreleased]`를 `[X.Y.Z] - 날짜`로 정리(Keep a Changelog, 영문 헤더) |
-| Release 제목 | `[<도구>] vX.Y.Z - 한국어 제목` (예: `[vulnerability] v2.0.0 - 구조 개편과 항목별 독립 시험`). 태그와 달리 도구 이름을 대괄호로 앞에 두어 목록에서 도구가 먼저 보이게 함. 한국어 제목은 이번 릴리즈의 핵심 변화를 명사구로 25자 안팎으로 쓰고, 도구 이름·버전 반복과 괄호 부제는 쓰지 않음 |
+| Release 제목 | `[<도구>] vX.Y.Z - 한국어 제목` (예: `[vulnerability] v2.0.0 - 구조 개편과 항목별 독립 시험`).<br>태그와 달리 도구 이름을 대괄호로 앞에 두어 목록에서 도구가 먼저 보이게 함.<br>한국어 제목은 이번 릴리즈의 핵심 변화를 명사구로 25자 안팎으로 쓰고, 도구 이름·버전 반복과 괄호 부제는 쓰지 않음 |
 | Release 노트 | 한국어 음슴체 |
 | 첨부 | 배포 묶음(tar.gz)과 SHA256SUMS |
 | 확인 | 태그 push와 Release 생성은 사용자 확인 뒤에 함 |
