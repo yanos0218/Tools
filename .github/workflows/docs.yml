@@ -10,12 +10,14 @@ on:
       - '.markdownlint.jsonc'
       - '.github/workflows/docs.yml'
       - '.github/scripts/check_links.py'
+      - '.github/scripts/check_changelog.py'
   pull_request:
     paths:
       - '**/*.md'
       - '.markdownlint.jsonc'
       - '.github/workflows/docs.yml'
       - '.github/scripts/check_links.py'
+      - '.github/scripts/check_changelog.py'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -28,6 +30,8 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # 태그 시점의 CHANGELOG와 비교하려면 태그가 필요함
 
       - name: markdownlint
         uses: DavidAnson/markdownlint-cli2-action@v25
@@ -38,3 +42,7 @@ jobs:
       # 상대 경로 링크가 실제 파일을 가리키는지 확인(markdownlint는 이걸 보지 않음)
       - name: 링크 검사
         run: python3 -I .github/scripts/check_links.py
+
+      # 릴리즈된 CHANGELOG 섹션이 태그 시점과 같은지 확인(새 항목은 [Unreleased]에만, #51)
+      - name: CHANGELOG 릴리즈 섹션 불변 검사
+        run: python3 -I .github/scripts/check_changelog.py

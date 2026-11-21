@@ -20,7 +20,7 @@ flowchart LR
 
 | 워크플로 | 실행 조건(경로) | 검사 내용 |
 | --- | --- | --- |
-| [docs.yml](../.github/workflows/docs.yml) | `**/*.md`, `.markdownlint.jsonc` 변경 | 저장소 전체 markdownlint와 상대 링크 검사 |
+| [docs.yml](../.github/workflows/docs.yml) | `**/*.md`, `.markdownlint.jsonc` 변경 | 저장소 전체 markdownlint, 상대 링크 검사, 릴리즈된 CHANGELOG 섹션 불변 검사 |
 | [vulnerability.yml](../.github/workflows/vulnerability.yml) | `vulnerability/**` 변경(`.md`는 제외하되 회귀 테스트가 읽는 `vulnerability/docs/items.md`는 포함) | 문법·정적 분석·회귀 테스트와 실제 서버 환경 시험(회귀 테스트·왕복·항목별 독립 검증·SNMP, 4개 작업이 동시에 돎).<br>내용은 [운영 참고](../vulnerability/docs/operations.md#운영-참고) 참고 |
 
 - 러너는 모두 `ubuntu-24.04`. 대상 서버와 같은 환경임.

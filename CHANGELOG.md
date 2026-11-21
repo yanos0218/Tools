@@ -6,6 +6,8 @@
 
 ### Added
 
+- `docs.yml`에 릴리즈된 CHANGELOG 섹션 불변 검사 추가([.github/scripts/check_changelog.py](.github/scripts/check_changelog.py), #51)
+  - 가장 최근 `vulnerability-v*` 태그 시점의 `[X.Y.Z]` 섹션이 바뀌면 실패함. 새 항목은 `[Unreleased]`에만 적음.
 - `vulnerability.yml`의 왕복 작업에 러너 기본 설치물(Android SDK·dotnet 등) 정리 단계 추가(`/` 전체 탐색 시간 단축, #29). 왕복 작업 594초에서 410초로 줄었음(정리 71초 포함). 항목별 독립 검증은 정리만 124초 걸리고 이득이 없어 넣지 않음.
 - 이슈 양식 [.github/ISSUE_TEMPLATE/](.github/ISSUE_TEMPLATE/)(문제·할 일·research)와 [이슈 규칙](docs/workflow.md#이슈-규칙)(제목 `[툴이름] 제목`, 도구 라벨, 릴리즈별 마일스톤, 큰 작업은 하위 이슈)
 - `docs.yml`에 상대 링크 검사 단계 추가([.github/scripts/check_links.py](.github/scripts/check_links.py))
