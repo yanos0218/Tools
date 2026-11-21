@@ -28,6 +28,9 @@
 
 ### Changed
 
+- `vulnerability.yml`이 `vulnerability/`의 `.md`만 바뀐 커밋에서는 실행되지 않게 경로 필터를 고침(#50)
+  - 회귀 테스트가 읽는 `vulnerability/docs/items.md`는 계속 포함함. 문서 검사는 docs 워크플로가 맡음.
+  - 문서만 바꾼 커밋마다 돌던 약 23분(작업 합계)의 검사를 줄임.
 - `vulnerability.yml`의 항목별 독립 검증이 설정 파일 대신 환경변수 `VULN_ALLOW_APT`로 패키지 설치를 허용함(#45). `conf/` 제거에 따라 권한 설정 단계에서 `conf` 폴더도 뺌.
 - `vulnerability.yml`에서 항목별 독립 검증을 왕복 작업에서 떼어 별도 작업(`items`)으로 분리함(#29)
   - 두 작업을 동시에 돌려 걸리는 시간을 줄임. 소모 분은 작업 준비 시간만큼 조금 늘어남.

@@ -21,12 +21,13 @@ flowchart LR
 | 워크플로 | 실행 조건(경로) | 검사 내용 |
 | --- | --- | --- |
 | [docs.yml](../.github/workflows/docs.yml) | `**/*.md`, `.markdownlint.jsonc` 변경 | 저장소 전체 markdownlint와 상대 링크 검사 |
-| [vulnerability.yml](../.github/workflows/vulnerability.yml) | `vulnerability/**` 변경 | 문법·정적 분석·회귀 테스트와 실제 서버 환경 시험(회귀 테스트·왕복·항목별 독립 검증·SNMP, 4개 작업이 동시에 돎).<br>내용은 [운영 참고](../vulnerability/docs/operations.md#운영-참고) 참고 |
+| [vulnerability.yml](../.github/workflows/vulnerability.yml) | `vulnerability/**` 변경(`.md`는 제외하되 회귀 테스트가 읽는 `vulnerability/docs/items.md`는 포함) | 문법·정적 분석·회귀 테스트와 실제 서버 환경 시험(회귀 테스트·왕복·항목별 독립 검증·SNMP, 4개 작업이 동시에 돎).<br>내용은 [운영 참고](../vulnerability/docs/operations.md#운영-참고) 참고 |
 
 - 러너는 모두 `ubuntu-24.04`. 대상 서버와 같은 환경임.
 - push는 `main`만, 브랜치 작업은 PR 이벤트로만 실행함.
 - 워크플로마다 `concurrency`, `timeout-minutes`, 경로 필터를 둠. 비공개 저장소의 월 2,000분 한도를 지키기 위함.
 - 도구별 워크플로는 해당 폴더가 바뀔 때만 돎. 도구가 늘어도 서로의 검사에 영향이 없음.
+- 문서(`.md`)만 바뀐 커밋은 docs 워크플로만 돎. 도구 워크플로가 읽는 문서가 있으면 그 파일만 경로 필터에 다시 넣음(#50).
 
 ## 로컬 검사
 
