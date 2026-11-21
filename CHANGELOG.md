@@ -6,6 +6,9 @@
 
 ### Added
 
+- [docs/writing.md](docs/writing.md) 신설(#56)
+  - 개인 설정에만 있던 문서 작성 규칙(음슴체, 목록 줄바꿈, `#N` 뒤 조사, 변경 이력)을 저장소에 둠.
+  - 자동 검사가 CI에서 되는 것과 개인 훅에서만 되는 것을 구분해 적음.
 - `vulnerability.yml`의 회귀 테스트 단계에 시험 개수 일치 검사 추가([.github/scripts/check_test_count.py](.github/scripts/check_test_count.py), #52)
   - 실행 결과 `PASS=N`이 `vulnerability/README.md`·`CLAUDE.md`에 적힌 개수와 다르면 실패함.
 - `docs.yml`에 릴리즈된 CHANGELOG 섹션 불변 검사 추가([.github/scripts/check_changelog.py](.github/scripts/check_changelog.py), #51)

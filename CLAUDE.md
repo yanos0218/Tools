@@ -5,7 +5,7 @@
 ## 세션 시작 시 읽을 문서
 
 1. [README.md](README.md) (도구 목록)
-2. [docs/structure.md](docs/structure.md), [docs/workflow.md](docs/workflow.md)
+2. [docs/structure.md](docs/structure.md), [docs/workflow.md](docs/workflow.md), [docs/writing.md](docs/writing.md)
 3. [CHANGELOG.md](CHANGELOG.md)
 4. 작업할 도구 폴더의 README와 `docs/` (예: [vulnerability/README.md](vulnerability/README.md), [vulnerability/docs/](vulnerability/docs/usage.md))
 

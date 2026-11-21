@@ -18,6 +18,8 @@
   - 구조도, 메인·서브 구분, 도구 폴더 규약, 이름 규칙
 - [작업 흐름](docs/workflow.md)
   - 변경 흐름, CI 구조, 로컬 검사, 새 도구 추가 절차
+- [문서 작성 규칙](docs/writing.md)
+  - 음슴체, 목록 줄바꿈, 번호·링크, 자동 검사 범위
 - 도구별 문서는 각 도구 README의 문서 목록 참고
   - [vulnerability](vulnerability/README.md#문서)
 - [CHANGELOG.md](CHANGELOG.md)
