@@ -6,6 +6,8 @@
 
 ### Added
 
+- `vulnerability.yml`의 회귀 테스트 단계에 시험 개수 일치 검사 추가([.github/scripts/check_test_count.py](.github/scripts/check_test_count.py), #52)
+  - 실행 결과 `PASS=N`이 `vulnerability/README.md`·`CLAUDE.md`에 적힌 개수와 다르면 실패함.
 - `docs.yml`에 릴리즈된 CHANGELOG 섹션 불변 검사 추가([.github/scripts/check_changelog.py](.github/scripts/check_changelog.py), #51)
   - 가장 최근 `vulnerability-v*` 태그 시점의 `[X.Y.Z]` 섹션이 바뀌면 실패함. 새 항목은 `[Unreleased]`에만 적음.
 - `vulnerability.yml`의 왕복 작업에 러너 기본 설치물(Android SDK·dotnet 등) 정리 단계 추가(`/` 전체 탐색 시간 단축, #29). 왕복 작업 594초에서 410초로 줄었음(정리 71초 포함). 항목별 독립 검증은 정리만 124초 걸리고 이득이 없어 넣지 않음.
