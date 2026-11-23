@@ -6,7 +6,7 @@
 
 | 도구 | 분류 | 내용 | 대상 환경 | 버전 | 검증 |
 | --- | --- | --- | --- | --- | --- |
-| [vulnerability/](vulnerability/README.md) | 보안 | Linux 서버 보안 취약점 점검·조치·원복 스크립트 | Ubuntu 24.04, root | 7.0.2 | [vulnerability.yml](.github/workflows/vulnerability.yml) |
+| [vulnerability/](vulnerability/README.md) | 보안 | Linux 서버 보안 취약점 점검·조치·원복 스크립트 | Ubuntu 24.04, root | 7.0.3 | [vulnerability.yml](.github/workflows/vulnerability.yml) |
 
 새 도구는 이 표에 한 줄을 추가함. 절차는 [작업 흐름](docs/workflow.md#새-도구-추가-절차) 참고.
 
